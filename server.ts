@@ -3,12 +3,71 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import axios from "axios";
+import PDFDocument from "pdfkit";
+import nodemailer from "nodemailer";
+import fs from "fs";
 
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
   app.use(express.json());
+
+  // API routes
+  app.post("/api/send-prebooking-report", async (req, res) => {
+    try {
+      const { bookingData } = req.body;
+      const { bookingId, userName, userEmail, cropName, quantity, quantityUnit, referencePrice, priceUnit, bookingDate, bookingStatus } = bookingData;
+
+      // 1. Generate PDF in memory
+      const pdfBuffer = await new Promise<Buffer>((resolve, reject) => {
+        const doc = new PDFDocument();
+        const chunks: Buffer[] = [];
+        doc.on("data", (chunk) => chunks.push(chunk));
+        doc.on("end", () => resolve(Buffer.concat(chunks)));
+        doc.on("error", reject);
+
+        doc.fontSize(20).text("AgriNex Pre-Booking Confirmation", { align: "center" });
+        doc.moveDown();
+        doc.fontSize(12).text(`Booking ID: ${bookingId}`);
+        doc.text(`User: ${userName}`);
+        doc.text(`Email: ${userEmail}`);
+        doc.text(`Crop: ${cropName}`);
+        doc.text(`Quantity: ${quantity} ${quantityUnit}`);
+        doc.text(`Reference Price: ₹${referencePrice} / ${priceUnit}`);
+        doc.text(`Booking Date: ${bookingDate}`);
+        doc.text(`Status: ${bookingStatus}`);
+        doc.end();
+      });
+
+      // 2. Send Email
+      const transporter = nodemailer.createTransport({
+        service: "gmail",
+        auth: {
+          user: process.env.EMAIL_USER,
+          pass: process.env.EMAIL_PASS,
+        },
+      });
+
+      await transporter.sendMail({
+        from: '"AgriNex Team" <noreply@agrinex.com>',
+        to: userEmail,
+        subject: `AgriNex Pre-Booking Confirmation - ${bookingId}`,
+        text: `Hello ${userName},\n\nYour AgriNex pre-booking has been successfully submitted.\n\nCrop: ${cropName}\nBooking ID: ${bookingId}\nStatus: ${bookingStatus}\n\nYour booking confirmation PDF is attached.\n\nThank you for using AgriNex.\nSmart Farming • Better Tomorrow`,
+        attachments: [
+          {
+            filename: `AgriNex_PreBooking_${bookingId}.pdf`,
+            content: pdfBuffer,
+          },
+        ],
+      });
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Booking Confirmation Error:", error);
+      res.status(500).json({ error: "Failed to generate confirmation." });
+    }
+  });
 
   // Initialize Gemini
   let ai: GoogleGenAI | null = null;

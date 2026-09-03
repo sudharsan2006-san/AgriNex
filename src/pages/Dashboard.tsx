@@ -43,10 +43,35 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Bottom Image Section */}
+      {/* Bottom Agriculture Visual Section */}
       <div className="p-6">
-        <div className="h-48 w-full bg-gray-200 rounded-3xl overflow-hidden flex items-center justify-center">
-            <img src="/src/assets/images/agrinex_logo.png" alt="AgriNex" className="w-full h-full object-contain" />
+        <div className="relative h-64 w-full bg-[#E8F5E9] rounded-3xl overflow-hidden flex flex-col items-center justify-center border border-[#A5D6A7]">
+            {/* AgriNex Logo/Image */}
+            <img 
+                src="https://lh3.googleusercontent.com/d/1ofiq5ADeNboiVIdyXrWDn2NwdtqtD18g" 
+                alt="AgriNex" 
+                className="w-32 h-32 object-contain mb-4"
+                onError={(e) => {
+                    (e.target as HTMLImageElement).style.display = 'none';
+                    const parent = e.target.parentElement;
+                    if(parent) {
+                        const placeholder = document.createElement('div');
+                        placeholder.innerText = 'AgriNex';
+                        placeholder.className = 'text-3xl font-black text-[#2D6A4F]';
+                        parent.prepend(placeholder);
+                    }
+                }}
+            />
+            
+            {/* Animated Agriculture Scene Placeholder */}
+            <div className="absolute bottom-0 w-full h-24 overflow-hidden">
+                {/* Subtle animated elements (CSS classes) */}
+                <div className="absolute bottom-0 w-full h-1 bg-[#2D6A4F]/20"></div>
+                <div className="absolute bottom-2 left-10 animate-pulse text-2xl">🌱</div>
+                <div className="absolute bottom-1 right-10 animate-bounce text-2xl">🚜</div>
+            </div>
+            
+            <p className="text-[#2D6A4F] font-bold mt-2">Smart Farming • Better Tomorrow</p>
         </div>
       </div>
     </div>

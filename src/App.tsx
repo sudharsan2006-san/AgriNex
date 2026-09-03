@@ -18,8 +18,14 @@ import LiveWeatherMap from "./pages/LiveWeatherMap";
 import SoilStatus from "./pages/SoilStatus";
 import Monitoring from "./pages/Monitoring";
 import Marketplace from "./pages/Marketplace";
+import Pricing from "./pages/Pricing";
 import MarketDetails from "./pages/MarketDetails";
+import PreBookingDemo from "./pages/PreBookingDemo";
+import MyBookingsDemo from "./pages/MyBookingsDemo";
+import MyPreBookings from "./pages/MyPreBookings";
+import PreBookingDetails from "./pages/PreBookingDetails";
 import MyBookings from "./pages/MyBookings";
+import MyFarmRecords from "./pages/MyFarmRecords";
 import IoTTools from "./pages/IoTTools";
 import Login from "./pages/Login";
 import Signup from "./pages/Signup";
@@ -93,8 +99,14 @@ export default function App() {
             <Route path="/profile" element={<Profile />} />
             <Route path="/monitoring" element={<Monitoring />} />
             <Route path="/marketplace" element={<Marketplace />} />
+            <Route path="/pricing" element={<Pricing />} />
+            <Route path="/pre-booking-demo" element={<PreBookingDemo />} />
+            <Route path="/my-bookings-demo" element={<MyBookingsDemo />} />
             <Route path="/market-details/:cropName" element={<MarketDetails />} />
+            <Route path="/my-pre-bookings" element={<MyPreBookings />} />
+            <Route path="/pre-booking-details/:bookingId" element={<PreBookingDetails />} />
             <Route path="/my-bookings" element={<MyBookings />} />
+            <Route path="/my-farm-records" element={<MyFarmRecords />} />
             <Route path="/login" element={<Login />} />
             <Route path="/signup" element={<Signup />} />
             <Route path="/iot-device" element={<IoTTools />} />

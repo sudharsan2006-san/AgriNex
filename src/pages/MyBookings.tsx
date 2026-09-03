@@ -76,12 +76,24 @@ export default function MyBookings() {
               console.error("Email failed:", e);
           }
       }
+
+      // 3. Update status in Farm Record
+      if (booking.recordId) {
+          try {
+            await updateDoc(doc(db, "users", auth.currentUser!.uid, "farmRecords", booking.recordId), { bookingStatus: booking.status, updatedAt: serverTimestamp() });
+          } catch (e) {
+              console.error("Farm record update failed:", e);
+          }
+      }
   }
 
-  const handleCancel = async (firebaseId: string) => {
+  const handleCancel = async (firebaseId: string, recordId?: string) => {
       if(window.confirm("Are you sure you want to cancel this booking?")) {
           try {
             await updateDoc(doc(db, "preBookings", firebaseId), { status: "Cancelled", updatedAt: serverTimestamp() });
+            if (recordId) {
+                await updateDoc(doc(db, "users", auth.currentUser!.uid, "farmRecords", recordId), { bookingStatus: "Cancelled", updatedAt: serverTimestamp() });
+            }
           } catch(e) {
               console.error(e);
               alert("Error cancelling booking.");
@@ -114,7 +126,7 @@ export default function MyBookings() {
                       <p className="text-sm"><strong>Booking Created:</strong> {booking.createdAt?.toDate().toLocaleString() || "N/A"}</p>
                       
                       {booking.status === "Pending" && (
-                          <button onClick={() => handleCancel(booking.firebaseId)} className="mt-3 w-full bg-red-50 text-red-600 py-2 rounded-xl font-bold text-sm">Cancel Booking</button>
+                          <button onClick={() => handleCancel(booking.firebaseId, booking.recordId)} className="mt-3 w-full bg-red-50 text-red-600 py-2 rounded-xl font-bold text-sm">Cancel Booking</button>
                       )}
                   </div>
               ))}

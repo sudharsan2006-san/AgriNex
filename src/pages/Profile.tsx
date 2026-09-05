@@ -7,24 +7,24 @@ import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from "firebase/firest
 
 export default function Profile() {
   const user = auth.currentUser;
-  
+
   const [userData, setUserData] = useState<any>(user ? {
-      uid: user.uid,
-      name: user.displayName || "AgriNex User",
-      email: user.email,
-      photoURL: user.photoURL,
-      loginMethod: user.providerData[0]?.providerId === 'google.com' ? 'Google' : 'Email/Password',
-      createdAt: user.metadata.creationTime ? new Date(user.metadata.creationTime).toLocaleDateString() : "Unknown",
+    uid: user.uid,
+    userId: user.uid,
+    name: user.displayName || "AgriNex User",
+    email: user.email,
+    photoURL: user.photoURL,
+    loginMethod: user.providerData[0]?.providerId === 'google.com' ? 'Google' : 'Email/Password',
+    createdAt: user.metadata.creationTime ? new Date(user.metadata.creationTime).toLocaleDateString() : "Unknown",
   } : null);
 
-  const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  
+
   const [form, setForm] = useState({
-      name: "", phoneNumber: "", location: "", farmName: "", farmSize: "", primaryCrop: ""
+    name: "", location: "", farmName: "", farmSize: "", primaryCrop: ""
   });
 
   useEffect(() => {
@@ -33,15 +33,16 @@ export default function Profile() {
         window.location.href = "/login";
         return;
       }
-      
+
       // Update with latest Auth data
       const initialData = {
-          uid: user.uid,
-          name: user.displayName || "AgriNex User",
-          email: user.email,
-          photoURL: user.photoURL,
-          loginMethod: user.providerData[0]?.providerId === 'google.com' ? 'Google' : 'Email/Password',
-          createdAt: user.metadata.creationTime ? new Date(user.metadata.creationTime).toLocaleDateString() : "Unknown",
+        uid: user.uid,
+        userId: user.uid,
+        name: user.displayName || "AgriNex User",
+        email: user.email,
+        photoURL: user.photoURL,
+        loginMethod: user.providerData[0]?.providerId === 'google.com' ? 'Google' : 'Email/Password',
+        createdAt: user.metadata.creationTime ? new Date(user.metadata.creationTime).toLocaleDateString() : "Unknown",
       };
       setUserData((prev: any) => ({ ...prev, ...initialData }));
 
@@ -52,22 +53,22 @@ export default function Profile() {
           const dbData = userSnap.data();
           setUserData((prev: any) => ({ ...prev, ...dbData }));
           setForm({
-              name: dbData.name || initialData.name,
-              phoneNumber: dbData.phoneNumber || "",
-              location: dbData.location || "",
-              farmName: dbData.farmName || "",
-              farmSize: dbData.farmSize || "",
-              primaryCrop: dbData.primaryCrop || "",
+            name: dbData.name || initialData.name,
+            location: dbData.location || "",
+            farmName: dbData.farmName || "",
+            farmSize: dbData.farmSize || "",
+            primaryCrop: dbData.primaryCrop || "",
           });
         } else {
-            await setDoc(doc(db, "users", user.uid), { 
-                ...initialData,
-                createdAt: serverTimestamp(),
-                updatedAt: serverTimestamp() 
-            });
+          await setDoc(doc(db, "users", user.uid), {
+            ...initialData,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp()
+          });
         }
       } catch (err) {
         console.error("Error fetching background data:", err);
+        setError("Unable to load saved profile details. Please try again.");
       }
     });
 
@@ -78,20 +79,20 @@ export default function Profile() {
     setSaving(true);
     setError(null);
     setSuccess(null);
-    
+
     try {
-        await updateDoc(doc(db, "users", userData.uid), {
-            ...form,
-            updatedAt: serverTimestamp()
-        });
-        setUserData({...userData, ...form});
-        setEditing(false);
-        setSuccess("Profile updated successfully!");
+      await updateDoc(doc(db, "users", userData.uid), {
+        ...form,
+        updatedAt: serverTimestamp()
+      });
+      setUserData({ ...userData, ...form });
+      setEditing(false);
+      setSuccess("Profile updated successfully!");
     } catch (err) {
-        console.error("Error updating profile:", err);
-        setError("Unable to update profile. Please try again.");
+      console.error("Error updating profile:", err);
+      setError("Unable to update profile. Please try again.");
     } finally {
-        setSaving(false);
+      setSaving(false);
     }
   };
 
@@ -114,7 +115,7 @@ export default function Profile() {
     <div className="p-6 min-h-screen bg-[#F0F7F4]">
       <BackButton />
       <h1 className="text-2xl font-black text-[#1B4332] mb-6 flex items-center gap-2">👤 Profile</h1>
-      
+
       {success && <p className="bg-green-100 text-green-800 p-3 rounded-xl mb-4 font-bold">{success}</p>}
       {error && <p className="bg-red-100 text-red-800 p-3 rounded-xl mb-4 font-bold">{error}</p>}
 
@@ -135,31 +136,29 @@ export default function Profile() {
 
         {!editing ? (
           <div className="space-y-4">
-              <div><p className="text-xs text-gray-500 font-bold uppercase">Full Name</p><p className="text-lg font-bold text-[#1B4332]">{userData?.name}</p></div>
-              <div><p className="text-xs text-gray-500 font-bold uppercase">Email Address</p><p className="text-lg font-bold text-[#1B4332]">{userData?.email}</p></div>
-              <div><p className="text-xs text-gray-500 font-bold uppercase">Mobile Number</p><p className="text-lg font-bold text-[#1B4332]">{userData?.phoneNumber || "Not set"}</p></div>
-              <div><p className="text-xs text-gray-500 font-bold uppercase">Location</p><p className="text-lg font-bold text-[#1B4332]">{userData?.location || "Not set"}</p></div>
-              <div><p className="text-xs text-gray-500 font-bold uppercase">Farm Name</p><p className="text-lg font-bold text-[#1B4332]">{userData?.farmName || "Not set"}</p></div>
-              <div><p className="text-xs text-gray-500 font-bold uppercase">Farm Size</p><p className="text-lg font-bold text-[#1B4332]">{userData?.farmSize || "Not set"}</p></div>
-              <div><p className="text-xs text-gray-500 font-bold uppercase">Primary Crop</p><p className="text-lg font-bold text-[#1B4332]">{userData?.primaryCrop || "Not set"}</p></div>
-              <hr className="my-4"/>
-              <div><p className="text-xs text-gray-500 font-bold uppercase">Firebase UID</p><p className="text-sm font-mono text-gray-700 bg-gray-100 p-2 rounded">{userData?.uid}</p></div>
-              <div><p className="text-xs text-gray-500 font-bold uppercase">Login Method</p><p className="text-lg font-bold text-[#1B4332] capitalize">{userData?.loginMethod}</p></div>
-              <div><p className="text-xs text-gray-500 font-bold uppercase">Member Since</p><p className="text-lg font-bold text-[#1B4332]">{userData?.createdAt}</p></div>
-              <button onClick={() => setEditing(true)} className="w-full bg-[#2D6A4F] text-white py-4 rounded-full font-bold text-lg mt-6">Edit Profile</button>
+            <div><p className="text-xs text-gray-500 font-bold uppercase">Full Name</p><p className="text-lg font-bold text-[#1B4332]">{userData?.name}</p></div>
+            <div><p className="text-xs text-gray-500 font-bold uppercase">Email Address</p><p className="text-lg font-bold text-[#1B4332]">{userData?.email}</p></div>
+            <div><p className="text-xs text-gray-500 font-bold uppercase">Location</p><p className="text-lg font-bold text-[#1B4332]">{userData?.location || "Not set"}</p></div>
+            <div><p className="text-xs text-gray-500 font-bold uppercase">Farm Name</p><p className="text-lg font-bold text-[#1B4332]">{userData?.farmName || "Not set"}</p></div>
+            <div><p className="text-xs text-gray-500 font-bold uppercase">Farm Size</p><p className="text-lg font-bold text-[#1B4332]">{userData?.farmSize || "Not set"}</p></div>
+            <div><p className="text-xs text-gray-500 font-bold uppercase">Primary Crop</p><p className="text-lg font-bold text-[#1B4332]">{userData?.primaryCrop || "Not set"}</p></div>
+            <hr className="my-4" />
+            <div><p className="text-xs text-gray-500 font-bold uppercase">Firebase UID</p><p className="text-sm font-mono text-gray-700 bg-gray-100 p-2 rounded">{userData?.uid}</p></div>
+            <div><p className="text-xs text-gray-500 font-bold uppercase">Login Method</p><p className="text-lg font-bold text-[#1B4332] capitalize">{userData?.loginMethod}</p></div>
+            <div><p className="text-xs text-gray-500 font-bold uppercase">Member Since</p><p className="text-lg font-bold text-[#1B4332]">{userData?.createdAt}</p></div>
+            <button onClick={() => setEditing(true)} className="w-full bg-[#2D6A4F] text-white py-4 rounded-full font-bold text-lg mt-6">Edit Profile</button>
           </div>
         ) : (
           <div className="space-y-4">
-              <input type="text" placeholder="Full Name" value={form.name} onChange={e => setForm({...form, name: e.target.value})} className="w-full p-3 border rounded-xl" />
-              <input type="tel" placeholder="Mobile Number" value={form.phoneNumber} onChange={e => setForm({...form, phoneNumber: e.target.value})} className="w-full p-3 border rounded-xl" />
-              <input type="text" placeholder="Location" value={form.location} onChange={e => setForm({...form, location: e.target.value})} className="w-full p-3 border rounded-xl" />
-              <input type="text" placeholder="Farm Name" value={form.farmName} onChange={e => setForm({...form, farmName: e.target.value})} className="w-full p-3 border rounded-xl" />
-              <input type="text" placeholder="Farm Size" value={form.farmSize} onChange={e => setForm({...form, farmSize: e.target.value})} className="w-full p-3 border rounded-xl" />
-              <input type="text" placeholder="Primary Crop" value={form.primaryCrop} onChange={e => setForm({...form, primaryCrop: e.target.value})} className="w-full p-3 border rounded-xl" />
-              <div className="flex gap-4 mt-6">
-                <button onClick={handleSave} disabled={saving} className="flex-1 bg-[#2D6A4F] text-white py-4 rounded-full font-bold text-lg">{saving ? "Saving..." : "Save Changes"}</button>
-                <button onClick={() => setEditing(false)} className="flex-1 bg-gray-200 text-gray-700 py-4 rounded-full font-bold text-lg">Cancel</button>
-              </div>
+            <input type="text" placeholder="Full Name" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} className="w-full p-3 border rounded-xl" />
+            <input type="text" placeholder="Location" value={form.location} onChange={e => setForm({ ...form, location: e.target.value })} className="w-full p-3 border rounded-xl" />
+            <input type="text" placeholder="Farm Name" value={form.farmName} onChange={e => setForm({ ...form, farmName: e.target.value })} className="w-full p-3 border rounded-xl" />
+            <input type="text" placeholder="Farm Size" value={form.farmSize} onChange={e => setForm({ ...form, farmSize: e.target.value })} className="w-full p-3 border rounded-xl" />
+            <input type="text" placeholder="Primary Crop" value={form.primaryCrop} onChange={e => setForm({ ...form, primaryCrop: e.target.value })} className="w-full p-3 border rounded-xl" />
+            <div className="flex gap-4 mt-6">
+              <button onClick={handleSave} disabled={saving} className="flex-1 bg-[#2D6A4F] text-white py-4 rounded-full font-bold text-lg">{saving ? "Saving..." : "Save Changes"}</button>
+              <button onClick={() => setEditing(false)} className="flex-1 bg-gray-200 text-gray-700 py-4 rounded-full font-bold text-lg">Cancel</button>
+            </div>
           </div>
         )}
       </div>

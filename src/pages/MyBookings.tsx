@@ -24,7 +24,7 @@ export default function MyBookings() {
     if (!auth.currentUser) return;
     const q = query(collection(db, "preBookings"), where("userId", "==", auth.currentUser.uid));
     const unsubscribe = onSnapshot(q, (snapshot) => {
-        const newBookings = snapshot.docs.map(doc => ({ firebaseId: doc.id, ...doc.data() }));
+        const newBookings = snapshot.docs.map(doc => ({ firebaseId: doc.id, ...doc.data() } as any));
         
         // Check for status changes
         newBookings.forEach(async (booking) => {
@@ -76,24 +76,12 @@ export default function MyBookings() {
               console.error("Email failed:", e);
           }
       }
-
-      // 3. Update status in Farm Record
-      if (booking.recordId) {
-          try {
-            await updateDoc(doc(db, "users", auth.currentUser!.uid, "farmRecords", booking.recordId), { bookingStatus: booking.status, updatedAt: serverTimestamp() });
-          } catch (e) {
-              console.error("Farm record update failed:", e);
-          }
-      }
   }
 
-  const handleCancel = async (firebaseId: string, recordId?: string) => {
+  const handleCancel = async (firebaseId: string) => {
       if(window.confirm("Are you sure you want to cancel this booking?")) {
           try {
             await updateDoc(doc(db, "preBookings", firebaseId), { status: "Cancelled", updatedAt: serverTimestamp() });
-            if (recordId) {
-                await updateDoc(doc(db, "users", auth.currentUser!.uid, "farmRecords", recordId), { bookingStatus: "Cancelled", updatedAt: serverTimestamp() });
-            }
           } catch(e) {
               console.error(e);
               alert("Error cancelling booking.");
@@ -119,14 +107,28 @@ export default function MyBookings() {
                         <StatusBadge status={booking.status} />
                       </div>
                       <p className="text-sm"><strong>Booking ID:</strong> {booking.bookingId}</p>
-                      <p className="text-sm"><strong>Quantity:</strong> {booking.requiredQuantity} {booking.priceUnit}</p>
+                      <p className="text-sm"><strong>Quantity:</strong> {booking.quantity} {booking.priceUnit}</p>
                       <p className="text-sm"><strong>Reference Price:</strong> ₹{booking.referencePrice} / {booking.priceUnit}</p>
                       <p className="text-sm"><strong>Location:</strong> {booking.preferredLocation}</p>
                       <p className="text-sm"><strong>Preferred Date:</strong> {booking.purchaseDate}</p>
                       <p className="text-sm"><strong>Booking Created:</strong> {booking.createdAt?.toDate().toLocaleString() || "N/A"}</p>
+                      {booking.emailStatus && (
+                        <div className="mt-2 flex items-center gap-1.5 text-xs">
+                          <span className="font-semibold text-gray-500">PDF Email:</span>
+                          {booking.emailStatus === "sent" ? (
+                            <span className="bg-green-100 text-green-800 font-bold px-2 py-0.5 rounded-full">Sent ✅</span>
+                          ) : (booking.emailStatus === "processing" || booking.emailStatus === "sending") ? (
+                            <span className="bg-blue-100 text-blue-800 font-bold px-2 py-0.5 rounded-full">Processing ⏳</span>
+                          ) : booking.emailStatus === "failed" ? (
+                            <span className="bg-red-100 text-red-800 font-bold px-2 py-0.5 rounded-full">Delivery Failed ⚠️</span>
+                          ) : (
+                            <span className="bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded-full">Pending</span>
+                          )}
+                        </div>
+                      )}
                       
                       {booking.status === "Pending" && (
-                          <button onClick={() => handleCancel(booking.firebaseId, booking.recordId)} className="mt-3 w-full bg-red-50 text-red-600 py-2 rounded-xl font-bold text-sm">Cancel Booking</button>
+                          <button onClick={() => handleCancel(booking.firebaseId)} className="mt-3 w-full bg-red-50 text-red-600 py-2 rounded-xl font-bold text-sm">Cancel Booking</button>
                       )}
                   </div>
               ))}

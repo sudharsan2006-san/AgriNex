@@ -30,15 +30,29 @@ export default function Login() {
 
   const handleForgotPassword = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!email || email.trim() === "") {
+        setError("Please enter a valid email address.");
+        return;
+    }
+    
     setLoading(true);
     setError(null);
     setMessage(null);
     try {
       await sendPasswordResetEmail(auth, email);
-      setMessage("Password reset email sent. Please check your inbox.");
+      setMessage("Password reset link sent successfully. Please check your email inbox and spam folder.");
       setIsResetView(false);
     } catch (err: any) {
-      setError(err.message);
+      console.error("Firebase Password Reset Error:", err);
+      if (err.code === "auth/user-not-found") {
+        setError("No account found with this email address.");
+      } else if (err.code === "auth/invalid-email") {
+        setError("Please enter a valid email address.");
+      } else if (err.code === "auth/network-request-failed") {
+        setError("Network error. Please check your internet connection.");
+      } else {
+        setError(err.message || "An unexpected error occurred. Please try again.");
+      }
     } finally {
       setLoading(false);
     }
@@ -86,7 +100,7 @@ export default function Login() {
             <h2 className="text-xl font-bold text-[#1B4332] mb-4">Reset Password</h2>
             <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Enter your registered email" className="w-full p-4 mb-4 border border-gray-200 rounded-2xl" required />
             <button disabled={loading} className="w-full bg-[#2D6A4F] text-white py-4 rounded-full font-bold text-lg mb-4">
-              {loading ? "Sending..." : "Send Reset Email"}
+              {loading ? "Sending reset link..." : "Send Reset Link"}
             </button>
             <button type="button" onClick={() => setIsResetView(false)} className="w-full py-2 text-gray-500 font-bold">Back to Login</button>
           </form>

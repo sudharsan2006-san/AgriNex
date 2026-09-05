@@ -18,19 +18,32 @@ import LiveWeatherMap from "./pages/LiveWeatherMap";
 import SoilStatus from "./pages/SoilStatus";
 import Monitoring from "./pages/Monitoring";
 import Marketplace from "./pages/Marketplace";
-import Pricing from "./pages/Pricing";
 import MarketDetails from "./pages/MarketDetails";
-import PreBookingDemo from "./pages/PreBookingDemo";
-import MyBookingsDemo from "./pages/MyBookingsDemo";
-import MyPreBookings from "./pages/MyPreBookings";
-import PreBookingDetails from "./pages/PreBookingDetails";
 import MyBookings from "./pages/MyBookings";
-import MyFarmRecords from "./pages/MyFarmRecords";
 import IoTTools from "./pages/IoTTools";
 import Login from "./pages/Login";
 import Signup from "./pages/Signup";
-
 import Records from "./pages/Records";
+import VoiceAssistant from "./components/VoiceAssistant";
+import NotificationBell from "./components/NotificationBell";
+
+const VoiceAssistantWrapper = () => {
+  const location = useLocation();
+  if (location.pathname === "/login" || location.pathname === "/signup") return null;
+  return <VoiceAssistant />;
+};
+
+// Persistent top bar with notification bell — visible on all authenticated pages
+const TopBar = () => {
+  const location = useLocation();
+  if (location.pathname === "/login" || location.pathname === "/signup") return null;
+  return (
+    <div className="fixed top-0 left-0 right-0 z-40 bg-white border-b border-gray-100 shadow-xs flex items-center justify-between px-4 py-2">
+      <span className="text-sm font-black text-[#2D6A4F]">🌱 AgriNex</span>
+      <NotificationBell />
+    </div>
+  );
+};
 
 const BottomNav = () => {
   const location = useLocation();
@@ -86,8 +99,9 @@ const AuthGuard = ({ children }: { children: React.ReactNode }) => {
 export default function App() {
   return (
     <BrowserRouter>
-      <div className="min-h-screen bg-[#F0F7F4] text-[#1B4332] pb-20">
+      <div className="min-h-screen bg-[#F0F7F4] text-[#1B4332] pb-20 pt-12">
         <AuthGuard>
+          <TopBar />
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/rain-map" element={<LiveWeatherMap />} />
@@ -99,21 +113,15 @@ export default function App() {
             <Route path="/profile" element={<Profile />} />
             <Route path="/monitoring" element={<Monitoring />} />
             <Route path="/marketplace" element={<Marketplace />} />
-            <Route path="/pricing" element={<Pricing />} />
-            <Route path="/pre-booking-demo" element={<PreBookingDemo />} />
-            <Route path="/my-bookings-demo" element={<MyBookingsDemo />} />
             <Route path="/market-details/:cropName" element={<MarketDetails />} />
-            <Route path="/my-pre-bookings" element={<MyPreBookings />} />
-            <Route path="/pre-booking-details/:bookingId" element={<PreBookingDetails />} />
             <Route path="/my-bookings" element={<MyBookings />} />
-            <Route path="/my-farm-records" element={<MyFarmRecords />} />
             <Route path="/login" element={<Login />} />
             <Route path="/signup" element={<Signup />} />
             <Route path="/iot-device" element={<IoTTools />} />
-
             <Route path="/records" element={<Records />} />
           </Routes>
         </AuthGuard>
+        <VoiceAssistantWrapper />
         <BottomNav />
       </div>
     </BrowserRouter>

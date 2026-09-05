@@ -1,13 +1,33 @@
+import "dotenv/config";
 import express from "express";
 import path from "path";
-import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import axios from "axios";
+import PDFDocument from "pdfkit";
+import nodemailer from "nodemailer";
+import { applicationDefault, cert, getApps, initializeApp as initializeAdminApp } from "firebase-admin/app";
+import { getAuth as getAdminAuth } from "firebase-admin/auth";
+import { getFirestore as getAdminFirestore, Timestamp } from "firebase-admin/firestore";
+import fs from "fs";
 
-// Load environment variables server-side from .env or .eve
-dotenv.config();
-dotenv.config({ path: path.join(process.cwd(), ".eve") });
+function getAdminApp() {
+  if (getApps().length > 0) return getApps()[0];
+
+  const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
+  return initializeAdminApp({
+    credential: serviceAccount ? cert(JSON.parse(serviceAccount)) : applicationDefault(),
+    projectId: process.env.FIREBASE_PROJECT_ID || "agrinex-59bd9",
+  });
+}
+
+function getAdminDb() {
+  return getAdminFirestore(getAdminApp(), process.env.FIRESTORE_DATABASE_ID || "ai-studio-agrinex-d499a7f0-c357-4880-ac81-ff5bc653b4ef");
+}
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
 
 async function startServer() {
   const app = express();
@@ -15,22 +35,140 @@ async function startServer() {
 
   app.use(express.json());
 
+  // API routes
+  app.post("/api/send-prebooking-report", async (req, res) => {
+    let bookingDocId: string | undefined;
+    try {
+      const authorization = req.headers.authorization;
+      if (!authorization?.startsWith("Bearer ")) {
+        return res.status(401).json({ error: "Authentication is required." });
+      }
+
+      const token = await getAdminAuth(getAdminApp()).verifyIdToken(authorization.slice(7));
+      const { bookingData, bookingDocId: requestedDocId, language = "en" } = req.body;
+      const isTamil = language === "ta";
+      bookingDocId = requestedDocId;
+      if (!bookingData || !bookingDocId || bookingData.userId !== token.uid || !token.email) {
+        return res.status(403).json({ error: "The booking does not belong to the authenticated user." });
+      }
+
+      const {
+        bookingId, userName, cropName, quantity, quantityUnit, referencePrice,
+        priceUnit, mobileNumber, bookingDate, bookingStatus,
+      } = bookingData;
+      const tamilStatuses: Record<string, string> = { Pending: "நிலுவையில் உள்ளது", Processing: "செயலாக்கத்தில் உள்ளது", Confirmed: "உறுதிப்படுத்தப்பட்டது", Completed: "முடிந்தது", Cancelled: "ரத்து செய்யப்பட்டது" };
+      const tamilCrops: Record<string, string> = { Paddy: "நெல்", Maize: "மக்காச்சோளம்", Tomato: "தக்காளி", Onion: "வெங்காயம்", Potato: "உருளைக்கிழங்கு", Brinjal: "கத்தரிக்காய்", Okra: "வெண்டைக்காய்", Carrot: "கேரட்", Banana: "வாழைப்பழம்" };
+      const displayCropName = isTamil ? tamilCrops[cropName] || cropName : cropName;
+      const displayBookingStatus = isTamil ? tamilStatuses[bookingStatus] || bookingStatus : bookingStatus;
+      const userEmail = token.email;
+      console.log("[prebooking-email] Authenticated recipient:", userEmail);
+      const adminDb = getAdminDb();
+      const bookingRef = adminDb.collection("preBookings").doc(bookingDocId);
+      const savedBooking = await bookingRef.get();
+      if (!savedBooking.exists || savedBooking.data()?.userId !== token.uid) {
+        return res.status(404).json({ error: "Booking was not found." });
+      }
+      console.log("[prebooking-email] Booking found; generating PDF:", { bookingDocId, bookingId });
+
+      // 1. Generate PDF in memory
+      const pdfBuffer = await new Promise<Buffer>((resolve, reject) => {
+        const doc = new PDFDocument();
+        const chunks: Buffer[] = [];
+        doc.on("data", (chunk) => chunks.push(chunk));
+        doc.on("end", () => resolve(Buffer.concat(chunks)));
+        doc.on("error", reject);
+
+        const tamilFont = process.env.TAMIL_FONT_PATH || "C:\\Windows\\Fonts\\latha.ttf";
+        if (isTamil && !fs.existsSync(tamilFont)) throw new Error("Tamil PDF font is not configured. Set TAMIL_FONT_PATH to a Tamil-capable .ttf file.");
+        const pdfFont = isTamil ? tamilFont : "Helvetica";
+        if (isTamil) doc.font(pdfFont);
+        doc.rect(50, 45, 42, 42).fill("#2D6A4F");
+        doc.fillColor("white").fontSize(25).font("Helvetica-Bold").text("A", 62, 53);
+        doc.fillColor("#1B4332").fontSize(24).text("AgriNex", 105, 50);
+        doc.font(isTamil ? pdfFont : "Helvetica").fillColor("#52796F").fontSize(10).text(isTamil ? "ஸ்மார்ட் பண்ணைகள் • சிறந்த நாளை" : "Smart Farming • Better Tomorrow", 107, 78);
+        doc.moveTo(50, 105).lineTo(545, 105).strokeColor("#B7D7C5").stroke();
+        doc.font(isTamil ? pdfFont : "Helvetica-Bold").fillColor("#1B4332").fontSize(20).text(isTamil ? "முன்பதிவு உறுதிப்படுத்தல்" : "Pre-Booking Confirmation", 50, 135);
+        if (!isTamil) doc.font("Helvetica");
+        doc.fillColor("#333333").fontSize(11);
+        const details = [
+          [isTamil ? "முன்பதிவு எண்" : "Booking ID", bookingId], [isTamil ? "பயனர் பெயர்" : "User Name", userName], [isTamil ? "பயனர் மின்னஞ்சல்" : "User Email", userEmail],
+          [isTamil ? "கைபேசி எண்" : "Mobile Number", mobileNumber], [isTamil ? "பயிர் பெயர்" : "Crop Name", displayCropName], [isTamil ? "அளவு" : "Quantity", `${quantity} ${quantityUnit}`],
+          [isTamil ? "குறிப்பு விலை" : "Reference Price", `₹${referencePrice} / ${priceUnit}`], [isTamil ? "முன்பதிவு தேதி மற்றும் நேரம்" : "Booking Date and Time", bookingDate],
+          [isTamil ? "முன்பதிவு நிலை" : "Booking Status", displayBookingStatus],
+        ];
+        let y = 185;
+        for (const [label, value] of details) {
+          doc.font(isTamil ? pdfFont : "Helvetica-Bold").fillColor("#1B4332").text(`${label}:`, 65, y, { width: 165 });
+          doc.font(isTamil ? pdfFont : "Helvetica").fillColor("#333333").text(String(value || "-"), 235, y, { width: 290 });
+          y += 28;
+        }
+        doc.font(isTamil ? pdfFont : "Helvetica").fillColor("#52796F").fontSize(9).text(isTamil ? "AgriNex-ஐ தேர்ந்தெடுத்ததற்கு நன்றி." : "Thank you for choosing AgriNex.", 50, y + 25);
+        doc.end();
+      });
+      if (!pdfBuffer.length) {
+        throw new Error("PDF generation returned an empty attachment.");
+      }
+      console.log("[prebooking-email] PDF generated:", { bookingId, bytes: pdfBuffer.length });
+
+      // 2. Send Email through Resend when configured, otherwise use SMTP.
+      const attachmentName = `AgriNex_PreBooking_${bookingId}.pdf`;
+      if (process.env.RESEND_API_KEY) {
+        const resendResponse = await axios.post("https://api.resend.com/emails", {
+          from: process.env.RESEND_FROM_EMAIL || "AgriNex <onboarding@resend.dev>",
+          to: [userEmail],
+          subject: isTamil ? `AgriNex - உங்கள் முன்பதிவு உறுதிப்படுத்தப்பட்டது` : `AgriNex - Your Booking Has Been Confirmed`,
+          text: isTamil ? `${userName}, வணக்கம்.\n\nஉங்கள் AgriNex முன்பதிவு வெற்றிகரமாக பதிவு செய்யப்பட்டது.\n\nAgriNex-ஐ பயன்படுத்தியதற்கு நன்றி.` : `Hello ${userName},\n\nYour AgriNex Pre-Booking has been successfully submitted.\n\nThank you for using AgriNex.`,
+          attachments: [{ filename: attachmentName, content: pdfBuffer.toString("base64") }],
+        }, { headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}` }, timeout: 15000 });
+        console.log("[prebooking-email] Resend accepted email:", { bookingId, response: resendResponse.data, attachment: attachmentName });
+      } else {
+        if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+          throw new Error("Email delivery is not configured. Set RESEND_API_KEY or EMAIL_USER and EMAIL_PASS.");
+        }
+        const transporter = nodemailer.createTransport({ service: "gmail", auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS } });
+        await transporter.verify();
+        const mailResult = await transporter.sendMail({
+          from: `"AgriNex Team" <${process.env.EMAIL_USER}>`, to: userEmail,
+          subject: isTamil ? `AgriNex - உங்கள் முன்பதிவு உறுதிப்படுத்தப்பட்டது` : `AgriNex - Your Booking Has Been Confirmed`,
+          text: isTamil ? `${userName}, வணக்கம்.\n\nஉங்கள் AgriNex முன்பதிவு வெற்றிகரமாக பதிவு செய்யப்பட்டது.\n\nஉங்கள் உறுதிப்படுத்தல் அறிக்கை PDF ஆக இணைக்கப்பட்டுள்ளது.` : `Hello ${userName},\n\nYour AgriNex Pre-Booking has been successfully submitted.\n\nYour AgriNex confirmation report is attached as a PDF.`,
+          attachments: [{ filename: attachmentName, content: pdfBuffer }],
+        });
+        if (!mailResult.accepted.includes(userEmail)) throw new Error(`Email provider did not accept recipient ${userEmail}.`);
+        console.log("[prebooking-email] SMTP accepted email:", { bookingId, messageId: mailResult.messageId, attachment: attachmentName });
+      }
+
+      await bookingRef.update({ emailStatus: "sent", emailSentAt: Timestamp.now() });
+      res.json({ success: true });
+    } catch (error) {
+      const emailError = getErrorMessage(error);
+      console.error("[prebooking-email] FAILED:", { bookingDocId, emailError, error });
+      if (bookingDocId) {
+        try {
+          await getAdminDb().collection("preBookings").doc(bookingDocId).update({ emailStatus: "failed", emailError });
+        } catch (statusError) {
+          console.error("Unable to record failed email status:", statusError);
+        }
+      }
+      res.status(500).json({ error: "Failed to generate confirmation." });
+    }
+  });
+
   // Initialize Gemini
   let ai: GoogleGenAI | null = null;
   const getAi = () => {
     if (!ai) {
-        const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey) {
-            throw new Error("GEMINI_API_KEY is not defined");
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        throw new Error("GEMINI_API_KEY is not defined");
+      }
+      ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          }
         }
-        ai = new GoogleGenAI({
-            apiKey,
-            httpOptions: {
-              headers: {
-                'User-Agent': 'aistudio-build',
-              }
-            }
-        });
+      });
     }
     return ai;
   };
@@ -54,29 +192,29 @@ async function startServer() {
           "suggestedAction": "string"
         }
       `;
-      
+
       let retries = 0;
       let response;
       while (retries < 3) {
-          try {
-              response = await getAi().models.generateContent({
-                model: "gemini-3.7-flash",
-                contents: prompt,
-                config: {
-                    responseMimeType: "application/json",
-                }
-              });
-              break;
-          } catch (error: any) {
-              if ((error?.status === 503 || error?.code === 503) && retries < 2) {
-                  retries++;
-                  await new Promise(resolve => setTimeout(resolve, 1500));
-                  continue;
-              }
-              throw error;
+        try {
+          response = await getAi().models.generateContent({
+            model: "gemini-3.7-flash",
+            contents: prompt,
+            config: {
+              responseMimeType: "application/json",
+            }
+          });
+          break;
+        } catch (error: any) {
+          if ((error?.status === 503 || error?.code === 503) && retries < 2) {
+            retries++;
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            continue;
           }
+          throw error;
+        }
       }
-      
+
       res.json(JSON.parse(response!.text!));
     } catch (error) {
       console.error("Gemini Error:", error);
@@ -84,213 +222,44 @@ async function startServer() {
     }
   });
 
-  function interpretWeatherCode(code: number): { condition: string; icon: string } {
-    if (code === 0) return { condition: "Clear Sky", icon: "☀️" };
-    if (code === 1 || code === 2) return { condition: "Partly Cloudy", icon: "⛅" };
-    if (code === 3) return { condition: "Overcast", icon: "☁️" };
-    if (code === 45 || code === 48) return { condition: "Fog", icon: "🌫️" };
-    if (code >= 51 && code <= 55) return { condition: "Light Drizzle", icon: "🌦️" };
-    if (code >= 61 && code <= 63) return { condition: "Rain", icon: "🌧️" };
-    if (code === 65) return { condition: "Heavy Rain", icon: "🌧️" };
-    if (code === 80 || code === 81) return { condition: "Rain Showers", icon: "🌦️" };
-    if (code === 82) return { condition: "Violent Rain", icon: "🌧️" };
-    if (code >= 95) return { condition: "Thunderstorm", icon: "⛈️" };
-    return { condition: "Cloudy", icon: "☁️" };
-  }
-
-  app.get("/api/location-search", async (req, res) => {
-    try {
-      const query = ((req.query.query as string) || "").trim();
-      if (!query || query.length < 2) {
-        return res.json([]);
-      }
-
-      const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=8&language=en&format=json`;
-      const response = await axios.get(geoUrl, { timeout: 6000 });
-      const results = (response.data.results || []).map((item: any) => ({
-        id: item.id,
-        name: item.name,
-        latitude: item.latitude,
-        longitude: item.longitude,
-        admin1: item.admin1 || "",
-        country: item.country || "",
-        displayName: [item.name, item.admin1, item.country].filter(Boolean).join(", "),
-      }));
-
-      res.json(results);
-    } catch (error: any) {
-      console.error("[Location Search Error]:", error?.message);
-      const TAMIL_NADU_LOCATIONS = [
-        { id: 1, name: "Chennai", latitude: 13.0827, longitude: 80.2707, admin1: "Tamil Nadu", country: "India", displayName: "Chennai, Tamil Nadu, India" },
-        { id: 2, name: "Madurai", latitude: 9.919, longitude: 78.1195, admin1: "Tamil Nadu", country: "India", displayName: "Madurai, Tamil Nadu, India" },
-        { id: 3, name: "Coimbatore", latitude: 11.0168, longitude: 76.9558, admin1: "Tamil Nadu", country: "India", displayName: "Coimbatore, Tamil Nadu, India" },
-        { id: 4, name: "Salem", latitude: 11.6643, longitude: 78.146, admin1: "Tamil Nadu", country: "India", displayName: "Salem, Tamil Nadu, India" },
-        { id: 5, name: "Tiruchirappalli", latitude: 10.7905, longitude: 78.7047, admin1: "Tamil Nadu", country: "India", displayName: "Tiruchirappalli, Tamil Nadu, India" },
-        { id: 6, name: "Thanjavur", latitude: 10.787, longitude: 79.1378, admin1: "Tamil Nadu", country: "India", displayName: "Thanjavur, Tamil Nadu, India" },
-        { id: 7, name: "Tirunelveli", latitude: 8.7139, longitude: 77.7567, admin1: "Tamil Nadu", country: "India", displayName: "Tirunelveli, Tamil Nadu, India" },
-        { id: 8, name: "Erode", latitude: 11.341, longitude: 77.7172, admin1: "Tamil Nadu", country: "India", displayName: "Erode, Tamil Nadu, India" },
-      ];
-      const q = ((req.query.query as string) || "").toLowerCase();
-      const filtered = TAMIL_NADU_LOCATIONS.filter(l => l.name.toLowerCase().includes(q));
-      res.json(filtered);
-    }
-  });
-
   app.get("/api/weather-data", async (req, res) => {
     try {
-      const lat = parseFloat(req.query.lat as string) || 13.0827;
-      const lng = parseFloat(req.query.lng as string) || 80.2707;
+      const { lat, lng } = req.query;
       const apiKey = process.env.WEATHER_API_KEY;
-
-      // 1. If WEATHER_API_KEY is configured and valid, attempt OpenWeatherMap
-      if (apiKey && apiKey !== "MY_WEATHER_API_KEY") {
-        try {
-          const owmRes = await axios.get(
-            `https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lng}&appid=${apiKey}&units=metric`,
-            { timeout: 5000 }
-          );
-          const data = owmRes.data;
-          const currentRain = data.list[0].rain?.["3h"] ? Number((data.list[0].rain["3h"] / 3).toFixed(1)) : 0;
-          const rainProb = Math.round((data.list[0].pop || 0) * 100);
-          const expectedRain = data.list[0].rain?.["3h"] ? Number(data.list[0].rain["3h"].toFixed(1)) : 0;
-
-          const next6h = data.list.slice(0, 2);
-          const next6hRain = next6h.reduce((sum: number, h: any) => sum + (h.rain?.["3h"] || 0), 0);
-          const next6hMaxProb = Math.max(...next6h.map((h: any) => (h.pop || 0) * 100), 0);
-
-          let rainStatus: "heavy" | "light" | "none" = "none";
-          if (expectedRain >= 5 || rainProb >= 70) rainStatus = "heavy";
-          else if (expectedRain >= 0.5 || rainProb >= 30) rainStatus = "light";
-
-          const farmerAlert = (next6hRain >= 1 || next6hMaxProb >= 40)
-            ? "Rain expected in the next few hours. Consider delaying irrigation."
-            : "No significant rain expected. Irrigation may be required.";
-
-          return res.json({
-            source: "OpenWeatherMap",
-            location: { lat, lng },
-            current: {
-              temp: Math.round(data.list[0].main.temp),
-              condition: data.list[0].weather[0].main,
-              icon: data.list[0].weather[0].main.toLowerCase().includes("rain") ? "🌧️" : "⛅",
-              humidity: data.list[0].main.humidity,
-              windSpeed: Math.round(data.list[0].wind.speed * 3.6),
-              precipitation: currentRain,
-              rainProb,
-              expectedRain,
-              rainStatus,
-              farmerAlert,
-              forecastTime: new Date(data.list[0].dt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-            },
-            hourly: data.list.slice(0, 12).map((h: any) => ({
-              time: new Date(h.dt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-              condition: h.weather[0].main,
-              icon: h.weather[0].main.toLowerCase().includes("rain") ? "🌧️" : "⛅",
-              prob: Math.round((h.pop || 0) * 100),
-              rain: h.rain?.["3h"] ? Number(h.rain["3h"].toFixed(1)) : 0,
-              temp: Math.round(h.main.temp),
-            })),
-            daily: [],
-            lastUpdated: new Date().toISOString(),
-          });
-        } catch (owmErr: any) {
-          console.warn("[Weather API] OpenWeatherMap failed, falling back to Open-Meteo:", owmErr.message);
-        }
+      if (!apiKey) {
+        throw new Error("WEATHER_API_KEY is not defined");
       }
 
-      // 2. High-precision, zero-key institutional real-time weather via Open-Meteo
-      const omUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current=temperature_2m,relative_humidity_2m,precipitation,rain,weather_code,wind_speed_10m&hourly=temperature_2m,precipitation_probability,precipitation,rain,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max&timezone=auto&forecast_days=7`;
-      const omRes = await axios.get(omUrl, { timeout: 8000 });
-      const om = omRes.data;
+      const response = await axios.get(
+        `https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lng}&appid=${apiKey}&units=metric`
+      );
+      const data = response.data;
 
-      const currentWmo = interpretWeatherCode(om.current.weather_code);
-      const curPrecip = Number((om.current.precipitation || 0).toFixed(1));
-
-      // Hourly data starting from current hour
-      const nowIso = new Date().toISOString().slice(0, 13);
-      let startIndex = om.hourly.time.findIndex((t: string) => t.startsWith(nowIso));
-      if (startIndex === -1) startIndex = 0;
-
-      const nextHourly = om.hourly.time.slice(startIndex, startIndex + 24).map((timeStr: string, idx: number) => {
-        const actualIdx = startIndex + idx;
-        const code = om.hourly.weather_code[actualIdx];
-        const info = interpretWeatherCode(code);
-        const d = new Date(timeStr);
-        return {
-          time: d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-          date: d.toLocaleDateString([], { month: "short", day: "numeric" }),
-          condition: info.condition,
-          icon: info.icon,
-          code,
-          prob: om.hourly.precipitation_probability[actualIdx] ?? 0,
-          rain: Number((om.hourly.precipitation[actualIdx] ?? 0).toFixed(1)),
-          temp: Math.round(om.hourly.temperature_2m[actualIdx] ?? 0),
-        };
-      });
-
-      // Next 6 hours rain summary
-      const next6h = nextHourly.slice(0, 6);
-      const next6hRain = next6h.reduce((acc: number, h: any) => acc + h.rain, 0);
-      const next6hMaxProb = Math.max(...next6h.map((h: any) => h.prob), 0);
-      const currentProb = nextHourly[0]?.prob ?? 0;
-      const expectedRainNextHours = Number(next6hRain.toFixed(1));
-
-      let rainStatus: "heavy" | "light" | "none" = "none";
-      if (expectedRainNextHours >= 5 || next6hMaxProb >= 70 || [65, 82, 95, 96, 99].includes(om.current.weather_code)) {
-        rainStatus = "heavy";
-      } else if (expectedRainNextHours >= 0.5 || next6hMaxProb >= 30 || [51, 53, 55, 61, 63, 80, 81].includes(om.current.weather_code)) {
-        rainStatus = "light";
-      }
-
-      const farmerAlert = (next6hRain >= 1 || next6hMaxProb >= 40)
-        ? "Rain expected in the next few hours. Consider delaying irrigation."
-        : "No significant rain expected. Irrigation may be required.";
-
-      // Daily 7-day forecast
-      const dailyForecast = om.daily.time.map((dayStr: string, i: number) => {
-        const code = om.daily.weather_code[i];
-        const info = interpretWeatherCode(code);
-        const d = new Date(dayStr);
-        return {
-          date: dayStr,
-          day: d.toLocaleDateString([], { weekday: "short" }),
-          formattedDate: d.toLocaleDateString([], { month: "short", day: "numeric" }),
-          condition: info.condition,
-          icon: info.icon,
-          tempMax: Math.round(om.daily.temperature_2m_max[i]),
-          tempMin: Math.round(om.daily.temperature_2m_min[i]),
-          rainSum: Number(om.daily.precipitation_sum[i].toFixed(1)),
-          probMax: om.daily.precipitation_probability_max[i] ?? 0,
-        };
-      });
-
-      const forecastTime = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-
-      res.json({
-        source: "Open-Meteo Real-Time",
-        location: { lat, lng },
+      // Transform to our format
+      const weatherData = {
         current: {
-          temp: Math.round(om.current.temperature_2m),
-          condition: currentWmo.condition,
-          icon: currentWmo.icon,
-          humidity: om.current.relative_humidity_2m,
-          windSpeed: Math.round(om.current.wind_speed_10m),
-          precipitation: curPrecip,
-          rainProb: currentProb,
-          expectedRain: expectedRainNextHours,
-          rainStatus,
-          farmerAlert,
-          forecastTime,
+          temp: data.list[0].main.temp,
+          condition: data.list[0].weather[0].main,
+          humidity: data.list[0].main.humidity,
+          windSpeed: data.list[0].wind.speed,
+          rainfall: data.list[0].rain?.['3h'] || 0,
+          rainProb: data.list[0].pop * 100 || 0,
+          expectedRain: data.list[0].rain?.['3h'] || 0
         },
-        hourly: nextHourly,
-        daily: dailyForecast,
-        lastUpdated: new Date().toISOString(),
-      });
-    } catch (error: any) {
-      console.error("[Weather API Error]:", error?.message || error);
-      res.status(500).json({
-        error: "Unable to fetch live weather data. Please check your internet connection or API connection.",
-      });
+        hourly: data.list.slice(0, 7).map((h: any) => ({
+          time: new Date(h.dt * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          condition: h.weather[0].main,
+          prob: h.pop * 100,
+          rain: h.rain?.['3h'] || 0,
+          temp: h.main.temp
+        })),
+        lastUpdated: new Date().toISOString()
+      };
+
+      res.json(weatherData);
+    } catch (error) {
+      console.error("Weather API Error:", error);
+      res.status(500).json({ error: "Unable to fetch live weather data. Please check your internet connection or API connection." });
     }
   });
 
@@ -309,193 +278,6 @@ async function startServer() {
     }
   });
 
-  // Pre-Booking Confirmation Email API endpoint with PDF report attachment
-  app.post("/api/send-prebooking-report", async (req, res) => {
-    const startTime = Date.now();
-    console.log("\n[AgriNex Backend] POST /api/send-prebooking-report received");
-    console.log("Request received");
-
-    // Set a response timeout - always respond within 15 seconds
-    const backendTimeout = setTimeout(() => {
-      if (!res.headersSent) {
-        console.error("[AgriNex] Backend timeout: email request took >15s, sending failure response");
-        res.status(200).json({
-          success: false,
-          emailStatus: "failed",
-          emailError: "Email backend timed out.",
-          error: "Email backend timed out. Confirmation email could not be sent."
-        });
-      }
-    }, 15000);
-
-    try {
-      const {
-        bookingId,
-        userName,
-        userEmail,
-        mobileNumber,
-        cropName,
-        quantity,
-        unit,
-        referencePrice,
-        bookingDate,
-        bookingTime,
-        bookingStatus,
-        preferredLocation,
-        notes,
-        sync,
-        t_booking_saved,
-        t_email_job_started
-      } = req.body;
-
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      const validEmail = typeof userEmail === "string" && emailRegex.test(userEmail.trim());
-
-      console.log(`- Booking ID: ${bookingId || "MISSING"}`);
-      console.log(`- Logged-in user email detected: ${validEmail ? "YES" : "NO"}`);
-      console.log("- Recipient email source: Firebase authenticated user");
-
-      if (!bookingId || !validEmail) {
-        clearTimeout(backendTimeout);
-        return res.status(400).json({
-          success: false,
-          emailStatus: "failed",
-          emailError: !bookingId ? "Missing required bookingId." : "Invalid recipient email address format.",
-          error: !bookingId ? "Missing required bookingId." : "Invalid recipient email address format."
-        });
-      }
-
-      let sendPreBookingReportEmail: any;
-      try {
-        const mailerModule = await import("./src/server/mailer");
-        sendPreBookingReportEmail = mailerModule.sendPreBookingReportEmail;
-      } catch (impErr: any) {
-        clearTimeout(backendTimeout);
-        console.error("Failed to load mailer module:", impErr);
-        return res.status(500).json({
-          success: false,
-          emailStatus: "failed",
-          emailError: `Failed to load email module: ${impErr?.message || impErr}`,
-          error: `Failed to load email module: ${impErr?.message || impErr}`
-        });
-      }
-
-      const emailParams = {
-        bookingId,
-        userName: userName || "Valued Farmer",
-        userEmail,
-        mobileNumber: mobileNumber || "",
-        cropName: cropName || "Crop",
-        quantity: quantity || 1,
-        unit: unit || "kg",
-        referencePrice: referencePrice || 0,
-        bookingDate: bookingDate || new Date().toISOString().split("T")[0],
-        bookingTime: bookingTime || new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        bookingStatus: bookingStatus || "Pre-Booked",
-        preferredLocation: preferredLocation || "",
-        notes: notes || "",
-        t_booking_saved,
-        t_email_job_started
-      };
-
-      // Non-blocking async execution by default for frontend UX (sync === false or undefined)
-      if (sync !== true) {
-        clearTimeout(backendTimeout);
-        // Respond immediately to frontend so booking completes with 0 wait time
-        res.status(200).json({
-          success: true,
-          emailStatus: "processing",
-          message: "Booking received. Processing confirmation email in background.",
-          bookingId
-        });
-
-        // Trigger background processing asynchronously
-        setImmediate(async () => {
-          try {
-            await sendPreBookingReportEmail(emailParams);
-          } catch (bgErr) {
-            console.error("- Background email processing error:", bgErr);
-          }
-        });
-        return;
-      }
-
-      // Synchronous execution for test diagnostics (sync === true)
-      const result = await sendPreBookingReportEmail(emailParams);
-      clearTimeout(backendTimeout);
-
-      if (!res.headersSent) {
-        return res.status(200).json({
-          success: result.success,
-          emailStatus: result.success ? "sent" : "failed",
-          resendEmailId: result.resendEmailId || result.messageId || null,
-          emailError: result.error || null,
-          error: result.error || null,
-          timing: result.timing,
-          message: result.success
-            ? `Confirmation report sent to ${userEmail}`
-            : `Email delivery failed: ${result.error}`,
-          details: result.details
-        });
-      }
-    } catch (error: any) {
-      clearTimeout(backendTimeout);
-      console.error("[AgriNex API Error] /api/send-prebooking-report:", error?.message || error);
-      if (!res.headersSent) {
-        return res.status(500).json({
-          success: false,
-          emailStatus: "failed",
-          emailError: error?.message || "Internal server error during email dispatch.",
-          error: error?.message || "Internal server error during email dispatch."
-        });
-      }
-    }
-  });
-
-  // Test Email endpoint for verification (Step 4 / Step 6)
-  app.post("/api/test-email", async (req, res) => {
-    try {
-      const { toEmail, includePdf } = req.body;
-      const { sendSimpleTestEmail } = await import("./src/server/mailer");
-      const result = await sendSimpleTestEmail(toEmail, Boolean(includePdf));
-      return res.status(result.success ? 200 : 400).json(result);
-    } catch (error: any) {
-      return res.status(500).json({ success: false, error: error?.message || "Test email error." });
-    }
-  });
-
-  // Notification Email API — handles all 5 notification event types
-  // Recipient MUST come from the frontend Firebase authenticated user (never hardcoded)
-  app.post("/api/send-notification-email", async (req, res) => {
-    // Immediately respond 202 so the frontend is never blocked
-    res.status(202).json({ success: true, emailStatus: "processing", message: "Notification email queued." });
-
-    // Fire-and-forget background email dispatch
-    setImmediate(async () => {
-      try {
-        const { type, toEmail, userName, title, message, payload } = req.body;
-
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!type || !toEmail || !emailRegex.test(toEmail)) {
-          console.error("[Notification API] Invalid request — missing type or bad email:", { type, toEmail });
-          return;
-        }
-
-        const { sendNotificationEmail } = await import("./src/server/mailer");
-        const result = await sendNotificationEmail({ type, toEmail, userName, title, message, payload });
-
-        if (result.success) {
-          console.log(`[Notification API] Email sent — type=${type} to=${toEmail} id=${result.resendEmailId}`);
-        } else {
-          console.error(`[Notification API] Email failed — type=${type} to=${toEmail} err=${result.error}`);
-        }
-      } catch (err: any) {
-        console.error("[Notification API] Unexpected error:", err?.message || err);
-      }
-    });
-  });
-
-
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -511,20 +293,8 @@ async function startServer() {
     });
   }
 
-  const server = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`\nAgriNex server running on http://localhost:${PORT}`);
-    console.log(`- Server environment loaded: YES`);
-    console.log(`- RESEND_API_KEY detected: ${Boolean(process.env.RESEND_API_KEY) ? "YES" : "NO"}`);
-    console.log(`- Email API route active: POST /api/send-prebooking-report\n`);
-  });
-
-  server.on("error", (err: any) => {
-    if (err.code === "EADDRINUSE") {
-      console.error(`\n[Server Error] Port ${PORT} is already in use by another running instance.`);
-      console.error(`Please stop previous processes or use: taskkill /F /IM node.exe in PowerShell.\n`);
-    } else {
-      console.error("Server error:", err);
-    }
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT}`);
   });
 }
 

@@ -3,6 +3,7 @@ import { useNavigate, Link } from "react-router-dom";
 import { signInWithEmailAndPassword, signInWithPopup, sendPasswordResetEmail } from "firebase/auth";
 import { auth, googleProvider } from "../lib/firebase";
 import { syncUserToFirestore } from "../lib/authHelpers";
+import { useLanguage } from "../lib/i18n";
 
 export default function Login() {
   const [email, setEmail] = useState("");
@@ -12,6 +13,7 @@ export default function Login() {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const navigate = useNavigate();
+  const { t } = useLanguage();
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -30,29 +32,15 @@ export default function Login() {
 
   const handleForgotPassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || email.trim() === "") {
-        setError("Please enter a valid email address.");
-        return;
-    }
-    
     setLoading(true);
     setError(null);
     setMessage(null);
     try {
       await sendPasswordResetEmail(auth, email);
-      setMessage("Password reset link sent successfully. Please check your email inbox and spam folder.");
+      setMessage(t("Password reset email sent. Please check your inbox."));
       setIsResetView(false);
     } catch (err: any) {
-      console.error("Firebase Password Reset Error:", err);
-      if (err.code === "auth/user-not-found") {
-        setError("No account found with this email address.");
-      } else if (err.code === "auth/invalid-email") {
-        setError("Please enter a valid email address.");
-      } else if (err.code === "auth/network-request-failed") {
-        setError("Network error. Please check your internet connection.");
-      } else {
-        setError(err.message || "An unexpected error occurred. Please try again.");
-      }
+      setError(err.message);
     } finally {
       setLoading(false);
     }
@@ -76,37 +64,37 @@ export default function Login() {
     <div className="min-h-screen bg-[#F0F7F4] flex flex-col justify-center p-6">
       <div className="text-center mb-8">
         <h1 className="text-4xl font-black text-[#1B4332] mb-2">AgriNex</h1>
-        <p className="text-lg text-[#2D6A4F]">Welcome to AgriNex</p>
-        <p className="text-sm text-[#40916C]">Smart Farms • Better Tomorrow</p>
+        <p className="text-lg text-[#2D6A4F]">{t("Welcome to AgriNex")}</p>
+        <p className="text-sm text-[#40916C]">{t("Smart Farms • Better Tomorrow")}</p>
       </div>
-      
+
       <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
         {!isResetView ? (
           <form onSubmit={handleLogin}>
-            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email Address" className="w-full p-4 mb-4 border border-gray-200 rounded-2xl" required />
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" className="w-full p-4 mb-2 border border-gray-200 rounded-2xl" required />
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder={t("Email Address")} className="w-full p-4 mb-4 border border-gray-200 rounded-2xl" required />
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={t("Password")} className="w-full p-4 mb-2 border border-gray-200 rounded-2xl" required />
             <div className="text-right mb-4">
-              <button type="button" onClick={() => setIsResetView(true)} className="text-sm text-[#2D6A4F] font-bold">Forgot Password?</button>
+              <button type="button" onClick={() => setIsResetView(true)} className="text-sm text-[#2D6A4F] font-bold">{t("Forgot Password?")}</button>
             </div>
             <button disabled={loading} className="w-full bg-[#2D6A4F] text-white py-4 rounded-full font-bold text-lg mb-4">
-              {loading ? "Logging in..." : "Login"}
+              {loading ? t("Logging in...") : t("Login")}
             </button>
             <button type="button" onClick={handleGoogleLogin} disabled={loading} className="w-full bg-white border border-gray-200 text-gray-700 py-4 rounded-full font-bold text-lg mb-4">
-              Continue with Google
+              {t("Continue with Google")}
             </button>
           </form>
         ) : (
           <form onSubmit={handleForgotPassword}>
-            <h2 className="text-xl font-bold text-[#1B4332] mb-4">Reset Password</h2>
-            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Enter your registered email" className="w-full p-4 mb-4 border border-gray-200 rounded-2xl" required />
+            <h2 className="text-xl font-bold text-[#1B4332] mb-4">{t("Reset Password")}</h2>
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder={t("Email Address")} className="w-full p-4 mb-4 border border-gray-200 rounded-2xl" required />
             <button disabled={loading} className="w-full bg-[#2D6A4F] text-white py-4 rounded-full font-bold text-lg mb-4">
-              {loading ? "Sending reset link..." : "Send Reset Link"}
+              {loading ? t("Sending") : t("Send Reset Email")}
             </button>
-            <button type="button" onClick={() => setIsResetView(false)} className="w-full py-2 text-gray-500 font-bold">Back to Login</button>
+            <button type="button" onClick={() => setIsResetView(false)} className="w-full py-2 text-gray-500 font-bold">{t("Back to Login")}</button>
           </form>
         )}
         <div className="text-center text-sm">
-            <p>Don't have an account? <Link to="/signup" className="text-[#2D6A4F] font-bold">Create Account</Link></p>
+          <p>{t("Don't have an account?")} <Link to="/signup" className="text-[#2D6A4F] font-bold">{t("Create Account")}</Link></p>
         </div>
         {error && <p className="text-red-500 mt-4 text-center text-sm font-bold">{error}</p>}
         {message && <p className="text-green-600 mt-4 text-center text-sm font-bold">{message}</p>}

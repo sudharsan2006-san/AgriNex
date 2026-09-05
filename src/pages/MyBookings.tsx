@@ -3,8 +3,9 @@ import { collection, query, onSnapshot, where, doc, updateDoc, addDoc, serverTim
 import emailjs from '@emailjs/browser';
 import { auth, db } from "../lib/firebase";
 import BackButton from "../components/BackButton";
+import { useLanguage } from "../lib/i18n";
 
-const StatusBadge = ({ status }: { status: string }) => {
+const StatusBadge = ({ status, label }: { status: string; label: string }) => {
     const colors: any = {
         Pending: "bg-yellow-100 text-yellow-800",
         Confirmed: "bg-blue-100 text-blue-800",
@@ -12,128 +13,129 @@ const StatusBadge = ({ status }: { status: string }) => {
         Completed: "bg-green-100 text-green-800",
         Cancelled: "bg-red-100 text-red-800"
     };
-    return <span className={`text-xs font-bold px-3 py-1 rounded-full ${colors[status] || "bg-gray-100"}`}>{status}</span>;
+    return <span className={`text-xs font-bold px-3 py-1 rounded-full ${colors[status] || "bg-gray-100"}`}>{label}</span>;
 };
 
 export default function MyBookings() {
-  const [bookings, setBookings] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const previousBookingsRef = useRef<any[]>([]);
+    const [bookings, setBookings] = useState<any[]>([]);
+    const [loading, setLoading] = useState(true);
+    const previousBookingsRef = useRef<Array<{ firebaseId: string; status?: string }>>([]);
+    const { t, crop, formatDate, language } = useLanguage();
 
-  useEffect(() => {
-    if (!auth.currentUser) return;
-    const q = query(collection(db, "preBookings"), where("userId", "==", auth.currentUser.uid));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-        const newBookings = snapshot.docs.map(doc => ({ firebaseId: doc.id, ...doc.data() } as any));
-        
-        // Check for status changes
-        newBookings.forEach(async (booking) => {
-            const oldBooking = previousBookingsRef.current.find(b => b.firebaseId === booking.firebaseId);
-            if (oldBooking && oldBooking.status !== booking.status) {
-                // Status changed!
-                handleStatusChange(booking, oldBooking.status);
-            }
+    useEffect(() => {
+        if (!auth.currentUser) return;
+        const q = query(collection(db, "preBookings"), where("userId", "==", auth.currentUser.uid));
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const newBookings: Array<{ firebaseId: string; status?: string }> = snapshot.docs.map(doc => ({ firebaseId: doc.id, ...doc.data() }));
+
+            // Check for status changes
+            newBookings.forEach(async (booking) => {
+                const oldBooking = previousBookingsRef.current.find(b => b.firebaseId === booking.firebaseId);
+                if (oldBooking && oldBooking.status !== booking.status) {
+                    // Status changed!
+                    handleStatusChange(booking, oldBooking.status);
+                }
+            }, () => setLoading(false));
+
+            previousBookingsRef.current = newBookings;
+            setBookings(newBookings);
+            setLoading(false);
         });
 
-        previousBookingsRef.current = newBookings;
-        setBookings(newBookings);
-        setLoading(false);
-    });
+        return () => unsubscribe();
+    }, []);
 
-    return () => unsubscribe();
-  }, []);
+    const handleStatusChange = async (booking: any, oldStatus: string) => {
+        // 1. Add Notification
+        await addDoc(collection(db, "notifications"), {
+            userId: auth.currentUser?.uid,
+            bookingId: booking.bookingId,
+            title: language === "ta" ? "முன்பதிவு நிலை புதுப்பிப்பு" : "Booking Status Update",
+            message: language === "ta" ? `${crop(booking.cropName)} முன்பதிவு ${booking.bookingId} ${t(booking.status)}.` : `Your ${booking.cropName} booking ${booking.bookingId} has been ${booking.status}.`,
+            status: booking.status,
+            read: false,
+            createdAt: serverTimestamp()
+        });
 
-  const handleStatusChange = async (booking: any, oldStatus: string) => {
-      // 1. Add Notification
-      await addDoc(collection(db, "notifications"), {
-          userId: auth.currentUser?.uid,
-          bookingId: booking.bookingId,
-          title: "Booking Status Update",
-          message: `Your ${booking.cropName} booking ${booking.bookingId} has been ${booking.status}.`,
-          status: booking.status,
-          read: false,
-          createdAt: serverTimestamp()
-      });
+        // 2. Send Email if not already notified
+        if (booking.lastNotifiedStatus !== booking.status) {
+            try {
+                await emailjs.send(
+                    import.meta.env.VITE_EMAILJS_SERVICE_ID,
+                    import.meta.env.VITE_EMAILJS_TEMPLATE_ID,
+                    {
+                        userName: booking.userName,
+                        bookingId: booking.bookingId,
+                        cropName: booking.cropName,
+                        status: booking.status,
+                        language,
+                        localizedStatus: t(booking.status),
+                        to_email: booking.userEmail
+                    },
+                    import.meta.env.VITE_EMAILJS_PUBLIC_KEY
+                );
+                // Update lastNotifiedStatus in Firestore
+                await updateDoc(doc(db, "preBookings", booking.firebaseId), { lastNotifiedStatus: booking.status });
+            } catch (e) {
+                console.error("Email failed:", e);
+            }
+        }
 
-      // 2. Send Email if not already notified
-      if (booking.lastNotifiedStatus !== booking.status) {
-          try {
-            await emailjs.send(
-                import.meta.env.VITE_EMAILJS_SERVICE_ID,
-                import.meta.env.VITE_EMAILJS_TEMPLATE_ID,
-                {
-                    userName: booking.userName,
-                    bookingId: booking.bookingId,
-                    cropName: booking.cropName,
-                    status: booking.status,
-                    to_email: booking.userEmail
-                },
-                import.meta.env.VITE_EMAILJS_PUBLIC_KEY
-            );
-            // Update lastNotifiedStatus in Firestore
-            await updateDoc(doc(db, "preBookings", booking.firebaseId), { lastNotifiedStatus: booking.status });
-          } catch (e) {
-              console.error("Email failed:", e);
-          }
-      }
-  }
+        // 3. Update status in Farm Record
+        if (booking.recordId) {
+            try {
+                await updateDoc(doc(db, "users", auth.currentUser!.uid, "farmRecords", booking.recordId), { bookingStatus: booking.status, updatedAt: serverTimestamp() });
+            } catch (e) {
+                console.error("Farm record update failed:", e);
+            }
+        }
+    }
 
-  const handleCancel = async (firebaseId: string) => {
-      if(window.confirm("Are you sure you want to cancel this booking?")) {
-          try {
-            await updateDoc(doc(db, "preBookings", firebaseId), { status: "Cancelled", updatedAt: serverTimestamp() });
-          } catch(e) {
-              console.error(e);
-              alert("Error cancelling booking.");
-          }
-      }
-  }
+    const handleCancel = async (firebaseId: string, recordId?: string) => {
+        if (window.confirm("Are you sure you want to cancel this booking?")) {
+            try {
+                await updateDoc(doc(db, "preBookings", firebaseId), { status: "Cancelled", updatedAt: serverTimestamp() });
+                if (recordId) {
+                    await updateDoc(doc(db, "users", auth.currentUser!.uid, "farmRecords", recordId), { bookingStatus: "Cancelled", updatedAt: serverTimestamp() });
+                }
+            } catch (e) {
+                console.error(e);
+                alert("Error cancelling booking.");
+            }
+        }
+    }
 
-  return (
-    <div className="p-6 pb-20 min-h-screen bg-[#F0F7F4]">
-      <BackButton />
-      <h1 className="text-xl font-black text-[#1B4332] mb-6">📋 My Pre-Bookings</h1>
-      
-      {loading ? (
-          <p>Loading bookings...</p>
-      ) : bookings.length === 0 ? (
-          <p>No pre-bookings found.</p>
-      ) : (
-          <div className="grid gap-4">
-              {bookings.map(booking => (
-                  <div key={booking.firebaseId} className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm">
-                      <div className="flex justify-between items-center mb-2">
-                        <h2 className="font-bold text-lg text-[#1B4332]">🌾 {booking.cropName}</h2>
-                        <StatusBadge status={booking.status} />
-                      </div>
-                      <p className="text-sm"><strong>Booking ID:</strong> {booking.bookingId}</p>
-                      <p className="text-sm"><strong>Quantity:</strong> {booking.quantity} {booking.priceUnit}</p>
-                      <p className="text-sm"><strong>Reference Price:</strong> ₹{booking.referencePrice} / {booking.priceUnit}</p>
-                      <p className="text-sm"><strong>Location:</strong> {booking.preferredLocation}</p>
-                      <p className="text-sm"><strong>Preferred Date:</strong> {booking.purchaseDate}</p>
-                      <p className="text-sm"><strong>Booking Created:</strong> {booking.createdAt?.toDate().toLocaleString() || "N/A"}</p>
-                      {booking.emailStatus && (
-                        <div className="mt-2 flex items-center gap-1.5 text-xs">
-                          <span className="font-semibold text-gray-500">PDF Email:</span>
-                          {booking.emailStatus === "sent" ? (
-                            <span className="bg-green-100 text-green-800 font-bold px-2 py-0.5 rounded-full">Sent ✅</span>
-                          ) : (booking.emailStatus === "processing" || booking.emailStatus === "sending") ? (
-                            <span className="bg-blue-100 text-blue-800 font-bold px-2 py-0.5 rounded-full">Processing ⏳</span>
-                          ) : booking.emailStatus === "failed" ? (
-                            <span className="bg-red-100 text-red-800 font-bold px-2 py-0.5 rounded-full">Delivery Failed ⚠️</span>
-                          ) : (
-                            <span className="bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded-full">Pending</span>
-                          )}
+    return (
+        <div className="p-6 pb-20 min-h-screen bg-[#F0F7F4]">
+            <BackButton />
+            <h1 className="text-xl font-black text-[#1B4332] mb-6">📋 {t("My Pre-Bookings")}</h1>
+
+            {loading ? (
+                <p>{t("Loading bookings...")}</p>
+            ) : bookings.length === 0 ? (
+                <p>{t("No pre-bookings found.")}</p>
+            ) : (
+                <div className="grid gap-4">
+                    {bookings.map(booking => (
+                        <div key={booking.firebaseId} className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm">
+                            <div className="flex justify-between items-center mb-2">
+                                <h2 className="font-bold text-lg text-[#1B4332]">🌾 {crop(booking.cropName)}</h2>
+                                <StatusBadge status={booking.status} label={t(booking.status)} />
+                            </div>
+                            <p className="text-sm"><strong>{t("Booking ID")}:</strong> {booking.bookingId}</p>
+                            <p className="text-sm"><strong>{t("Quantity")}:</strong> {booking.requiredQuantity} {booking.priceUnit}</p>
+                            <p className="text-sm"><strong>{t("Reference Price")}:</strong> ₹{booking.referencePrice} / {booking.priceUnit}</p>
+                            <p className="text-sm"><strong>{t("Location")}:</strong> {booking.preferredLocation}</p>
+                            <p className="text-sm"><strong>{t("Preferred Date")}:</strong> {booking.purchaseDate}</p>
+                            <p className="text-sm"><strong>{t("Booking Created")}:</strong> {booking.createdAt ? formatDate(booking.createdAt.toDate()) : "N/A"}</p>
+
+                            {booking.status === "Pending" && (
+                                <button onClick={() => handleCancel(booking.firebaseId, booking.recordId)} className="mt-3 w-full bg-red-50 text-red-600 py-2 rounded-xl font-bold text-sm">{t("Cancel Booking")}</button>
+                            )}
                         </div>
-                      )}
-                      
-                      {booking.status === "Pending" && (
-                          <button onClick={() => handleCancel(booking.firebaseId)} className="mt-3 w-full bg-red-50 text-red-600 py-2 rounded-xl font-bold text-sm">Cancel Booking</button>
-                      )}
-                  </div>
-              ))}
-          </div>
-      )}
-    </div>
-  );
+                    ))}
+                </div>
+            )}
+        </div>
+    );
 }

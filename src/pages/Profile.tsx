@@ -18,6 +18,22 @@ function getDevelopmentFirebaseError(error: unknown) {
   return `${getFirebaseErrorCode(error)}: ${getFirebaseErrorMessage(error)}`;
 }
 
+type ProfileData = {
+  uid: string;
+  userId: string;
+  name: string;
+  email: string | null;
+  photoURL?: string | null;
+  loginMethod: string;
+  createdAt: string;
+  location?: string;
+  farmName?: string;
+  farmSize?: string;
+  primaryCrop?: string;
+  phoneNumber?: string;
+  phoneVerified?: boolean;
+};
+
 export default function Profile() {
   const user = auth.currentUser;
   const { t } = useLanguage();
@@ -26,7 +42,7 @@ export default function Profile() {
   const requestedPhoneRef = useRef<string | null>(null);
   const mobileRequestRef = useRef(false);
 
-  const [userData, setUserData] = useState<any>(user ? {
+  const [userData, setUserData] = useState<ProfileData | null>(user ? {
     uid: user.uid,
     userId: user.uid,
     name: user.displayName || "AgriNex User",
@@ -262,6 +278,10 @@ export default function Profile() {
   };
 
   const handleSave = async () => {
+    if (!userData?.uid) {
+      setError(t("Unable to update profile. Please try again."));
+      return;
+    }
     setSaving(true);
     setError(null);
     setSuccess(null);

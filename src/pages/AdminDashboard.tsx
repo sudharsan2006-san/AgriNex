@@ -17,6 +17,7 @@ import {
 import { signOut } from "firebase/auth";
 import { db, auth } from "../lib/firebase";
 import { ADMIN_EMAIL, getFirebaseAuthHeaders, isAdminUserEmail } from "../lib/authHelpers";
+import { API_BASE } from "../lib/apiBase";
 import {
   MachineryItem,
   MachineryRequest,
@@ -533,7 +534,7 @@ export default function AdminDashboard({ initialSection }: AdminDashboardProps =
             });
           }
 
-          const response = await fetch("/api/send-prebooking-report", {
+          const response = await fetch(`${API_BASE}/api/send-prebooking-report`, {
             method: "POST",
             headers: { "Content-Type": "application/json", ...await getFirebaseAuthHeaders() },
             body: JSON.stringify({
@@ -707,7 +708,7 @@ export default function AdminDashboard({ initialSection }: AdminDashboardProps =
           { merge: true }
         );
 
-        fetch("/api/send-prebooking-report", {
+        fetch(`${API_BASE}/api/send-prebooking-report`, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...await getFirebaseAuthHeaders() },
           body: JSON.stringify({
@@ -777,7 +778,7 @@ export default function AdminDashboard({ initialSection }: AdminDashboardProps =
     setEmailStatusMsg(null);
 
     try {
-      const response = await fetch("/api/send-prebooking-retailer-email", {
+      const response = await fetch(`${API_BASE}/api/send-prebooking-retailer-email`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...await getFirebaseAuthHeaders() },
         body: JSON.stringify({

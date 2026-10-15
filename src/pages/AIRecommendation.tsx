@@ -1,5 +1,6 @@
 import { useState } from "react";
 import axios from "axios";
+import { API_BASE } from "../lib/apiBase";
 import BackButton from "../components/BackButton";
 
 export default function AIRecommendation() {
@@ -10,7 +11,7 @@ export default function AIRecommendation() {
   const handleSubmit = async () => {
     setLoading(true);
     try {
-      const response = await axios.post("/api/ai-recommendation", data);
+      const response = await axios.post(`${API_BASE}/api/ai-recommendation`, data);
       setResult(response.data);
     } catch (e) {
       console.error(e);

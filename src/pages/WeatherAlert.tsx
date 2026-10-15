@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
+import { API_BASE } from "../lib/apiBase";
 import BackButton from "../components/BackButton";
 
 export default function WeatherAlert() {
   const [weather, setWeather] = useState<any>(null);
 
   useEffect(() => {
-    axios.get("/api/weather?location=default").then((res) => setWeather(res.data));
+    axios.get(`${API_BASE}/api/weather?location=default`).then((res) => setWeather(res.data));
   }, []);
 
   return (

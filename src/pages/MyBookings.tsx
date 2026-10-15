@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { collection, query, onSnapshot, where, orderBy } from "firebase/firestore";
 import { auth, db } from "../lib/firebase";
 import { getFirebaseAuthHeaders } from "../lib/authHelpers";
+import { API_BASE } from "../lib/apiBase";
 import BackButton from "../components/BackButton";
 import { Download, FileText, Calendar, MapPin, CheckCircle2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
@@ -76,7 +77,7 @@ export default function MyBookings() {
   const downloadReport = async (booking: any) => {
     setDownloadingId(booking.bookingId);
     try {
-      const response = await fetch("/api/prebooking-report", {
+      const response = await fetch(`${API_BASE}/api/prebooking-report`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...await getFirebaseAuthHeaders() },
         body: JSON.stringify({

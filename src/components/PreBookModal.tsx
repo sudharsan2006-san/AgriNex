@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { addDoc, collection, serverTimestamp, doc, setDoc, updateDoc } from "firebase/firestore";
 import { auth, db } from "../lib/firebase";
 import { getFirebaseAuthHeaders } from "../lib/authHelpers";
+import { API_BASE } from "../lib/apiBase";
 import { CheckCircle2, Clock, MapPin, X } from "lucide-react";
 
 interface Props {
@@ -151,7 +152,7 @@ export default function PreBookModal({ listing, onClose }: Props) {
           ).catch((e) => console.warn("[AgriNex] Report collection sync note:", e));
 
           // 1. Send User Confirmation & PDF Report Email
-          const userEmailPromise = fetch("/api/send-prebooking-report", {
+          const userEmailPromise = fetch(`${API_BASE}/api/send-prebooking-report`, {
             method: "POST",
             headers: { "Content-Type": "application/json", ...authHeaders },
             body: JSON.stringify({ bookingData: bookingPayload }),
@@ -194,7 +195,7 @@ export default function PreBookModal({ listing, onClose }: Props) {
             });
 
           // 2. Send Admin Notification Email
-          const adminEmailPromise = fetch("/api/send-prebooking-admin-email", {
+          const adminEmailPromise = fetch(`${API_BASE}/api/send-prebooking-admin-email`, {
             method: "POST",
             headers: { "Content-Type": "application/json", ...authHeaders },
             body: JSON.stringify({ bookingData: bookingPayload }),

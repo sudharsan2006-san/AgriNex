@@ -3,6 +3,7 @@ import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import L from "leaflet";
 import axios from "axios";
+import { API_BASE } from "../lib/apiBase";
 import {
   MapPin, RefreshCw, Droplets, Wind, Search, Navigation,
   CloudRain, Sun, Cloud, AlertTriangle, CheckCircle2,
@@ -144,7 +145,7 @@ export default function LiveWeatherMap() {
   const fetchWeatherData = useCallback(async (lat: number, lng: number, locName?: string) => {
     try {
       setLoading(true);
-      const res = await axios.get(`/api/weather-data?lat=${lat}&lng=${lng}`, { timeout: 9000 });
+      const res = await axios.get(`${API_BASE}/api/weather-data?lat=${lat}&lng=${lng}`, { timeout: 9000 });
       const data = res.data;
       setWeather(data);
       setIsCached(false);
@@ -191,7 +192,7 @@ export default function LiveWeatherMap() {
     const timer = setTimeout(async () => {
       try {
         setIsSearching(true);
-        const res = await axios.get(`/api/location-search?query=${encodeURIComponent(searchQuery.trim())}`);
+        const res = await axios.get(`${API_BASE}/api/location-search?query=${encodeURIComponent(searchQuery.trim())}`);
         setSearchResults(res.data || []);
         setShowDropdown(true);
       } catch (err) {

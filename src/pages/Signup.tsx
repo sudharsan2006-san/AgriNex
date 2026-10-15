@@ -5,6 +5,7 @@ import { auth, googleProvider } from "../lib/firebase";
 import { syncUserToFirestore } from "../lib/authHelpers";
 import BackButton from "../components/BackButton";
 import { validatePassword, PASSWORD_REQUIREMENTS } from "../utils/passwordValidation";
+import { API_BASE } from "../lib/apiBase";
 import { Eye, EyeOff, CheckCircle2, XCircle, ShieldCheck, AlertCircle } from "lucide-react";
 
 export default function Signup() {
@@ -43,7 +44,7 @@ export default function Signup() {
 
     try {
       // 1. Validate on the Node.js/Express backend & hash with bcryptjs into MongoDB
-      const backendResponse = await fetch("/api/register", {
+      const backendResponse = await fetch(`${API_BASE}/api/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { collection, addDoc, serverTimestamp, query, where, getDocs, doc, getDoc, updateDoc } from "firebase/firestore";
 import { auth, db } from "../lib/firebase";
 import { getFirebaseAuthHeaders } from "../lib/authHelpers";
+import { API_BASE } from "../lib/apiBase";
 import { MachineryItem, FarmingActivityType } from "../types/machinery";
 import { createNotification } from "../utils/notificationService";
 import { X, Calendar, Clock, MapPin, CheckCircle2, AlertCircle, Sparkles, FileText, ChevronRight } from "lucide-react";
@@ -186,7 +187,7 @@ export default function MachineryRequestModal({
       });
 
       try {
-        const emailRes = await fetch("/api/send-machinery-request-admin-email", {
+        const emailRes = await fetch(`${API_BASE}/api/send-machinery-request-admin-email`, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...await getFirebaseAuthHeaders() },
           body: JSON.stringify({

@@ -51,6 +51,5 @@ export async function syncUserToFirestore(user: any, additionalData: any = {}) {
 export async function getFirebaseAuthHeaders(): Promise<Record<string, string>> {
   const user = auth.currentUser;
   if (!user) throw new Error("Authentication is required.");
-  const token = await user.getIdToken();
-  return { Authorization: `Bearer ${token}` };
+  return { Authorization: `Bearer ${await user.getIdToken()}` };
 }

@@ -80,6 +80,23 @@ async function startServer() {
       next();
     };
 
+  // CORS: Allow cross-origin requests from the Vercel frontend
+  app.use((req, res, next) => {
+    const allowedOrigins = (process.env.CORS_ORIGIN || "").split(",").map(s => s.trim()).filter(Boolean);
+    const origin = req.headers.origin || "";
+    if (allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+      res.setHeader("Access-Control-Allow-Origin", origin || "*");
+    }
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    if (req.method === "OPTIONS") {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
+
   app.use(express.json());
 
   // MongoDB Connection & User Schema for MERN Authentication

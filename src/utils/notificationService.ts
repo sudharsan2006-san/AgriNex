@@ -1,6 +1,7 @@
 import { addDoc, collection, serverTimestamp, doc, updateDoc } from "firebase/firestore";
 import { auth, db } from "../lib/firebase";
 import { getFirebaseAuthHeaders } from "../lib/authHelpers";
+import { API_BASE } from "../lib/apiBase";
 
 export type NotificationType =
   | "booking_confirmed"
@@ -101,7 +102,7 @@ export async function createNotification({
         emailStatus: "processing",
       });
 
-      const res = await fetch("/api/send-notification-email", {
+      const res = await fetch(`${API_BASE}/api/send-notification-email`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...await getFirebaseAuthHeaders() },
         body: JSON.stringify({

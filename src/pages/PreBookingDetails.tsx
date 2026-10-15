@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { doc, onSnapshot } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { getFirebaseAuthHeaders } from "../lib/authHelpers";
+import { API_BASE } from "../lib/apiBase";
 import { useParams } from "react-router-dom";
 import BackButton from "../components/BackButton";
 
@@ -26,7 +27,7 @@ export default function PreBookingDetails() {
         if (!booking) return;
         setReportLoading(true);
         try {
-            const response = await fetch("/api/prebooking-report", {
+            const response = await fetch(`${API_BASE}/api/prebooking-report`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json", ...await getFirebaseAuthHeaders() },
                 body: JSON.stringify({

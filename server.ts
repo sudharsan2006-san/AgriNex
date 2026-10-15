@@ -1,36 +1,567 @@
+import "dotenv/config";
 import express from "express";
+import type { Request, RequestHandler } from "express";
 import path from "path";
-import dotenv from "dotenv";
+import { readFileSync } from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import axios from "axios";
+import { sendNotificationEmail, sendPreBookingReportEmail, sendMachineryRequestReportEmail } from "./src/server/mailer";
+import { generatePreBookingPdfBuffer, generateMachineryPdfBuffer } from "./src/server/pdfGenerator";
+import mongoose from "mongoose";
+import bcrypt from "bcryptjs";
+import { validatePassword } from "./src/utils/passwordValidation";
 
-// Load environment variables server-side from .env or .eve
-dotenv.config();
-dotenv.config({ path: path.join(process.cwd(), ".eve") });
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT || 3000);
+  const firebaseConfig = JSON.parse(readFileSync(path.join(process.cwd(), "firebase-applet-config.json"), "utf8"));
+  const adminEmail = "sudharsan9001@gmail.com";
+
+  type FirebaseIdentity = { uid: string; email: string };
+  type AuthenticatedRequest = Request & { firebaseIdentity?: FirebaseIdentity };
+
+  const authenticateFirebase: RequestHandler = async (req, res, next) => {
+    const token = req.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
+    if (!token) {
+      res.status(401).json({ error: "Authentication is required." });
+      return;
+    }
+
+    try {
+      const response = await axios.post(
+        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${firebaseConfig.apiKey}`,
+        { idToken: token },
+        { timeout: 10000 }
+      );
+      const account = response.data.users?.[0];
+      if (!account?.localId || !account.email) {
+        res.status(401).json({ error: "A valid Firebase account is required." });
+        return;
+      }
+      (req as AuthenticatedRequest).firebaseIdentity = { uid: account.localId, email: account.email };
+      next();
+    } catch {
+      res.status(401).json({ error: "Firebase authentication could not be verified." });
+    }
+  };
+
+  const requireAdmin: RequestHandler = (req, res, next) => {
+    const identity = (req as AuthenticatedRequest).firebaseIdentity;
+    if (identity?.email !== adminEmail) {
+      res.status(403).json({ error: "Admin access is restricted to the authorized administrator account." });
+      return;
+    }
+    next();
+  };
+
+  const requireSelfOrAdmin = (getRecipient: (req: Request) => string | undefined): RequestHandler =>
+    (req, res, next) => {
+      const identity = (req as AuthenticatedRequest).firebaseIdentity;
+      const recipient = getRecipient(req)?.trim().toLowerCase();
+      if (identity?.email !== adminEmail && recipient !== identity?.email.toLowerCase()) {
+        res.status(403).json({ error: "You may only send reports to your authenticated account." });
+        return;
+      }
+      next();
+    };
+
+  const requireOwnerOrAdmin = (getOwner: (req: Request) => { uid?: string; email?: string }): RequestHandler =>
+    (req, res, next) => {
+      const identity = (req as AuthenticatedRequest).firebaseIdentity;
+      const owner = getOwner(req);
+      const matchesUid = !!owner.uid && owner.uid === identity?.uid;
+      const matchesEmail = !!owner.email && owner.email.trim().toLowerCase() === identity?.email.toLowerCase();
+      if (identity?.email !== adminEmail && !matchesUid && !matchesEmail) {
+        res.status(403).json({ error: "You may only access records belonging to your authenticated account." });
+        return;
+      }
+      next();
+    };
 
   app.use(express.json());
+
+  // MongoDB Connection & User Schema for MERN Authentication
+  const MONGODB_URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/agrinex";
+  mongoose
+    .connect(MONGODB_URI, { serverSelectionTimeoutMS: 5000 })
+    .then(() => {
+      console.log(`[AgriNex MongoDB] Connected successfully to ${MONGODB_URI}`);
+    })
+    .catch((err) => {
+      console.warn(`[AgriNex MongoDB] Connection notice: ${err?.message || err}`);
+    });
+
+  interface IUser {
+    name: string;
+    email: string;
+    password: string;
+    role: string;
+    createdAt: Date;
+  }
+
+  const userSchema = new mongoose.Schema<IUser>({
+    name: { type: String, required: true, trim: true },
+    email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    password: { type: String, required: true }, // Stored as bcrypt hash. Plain-text is never stored or logged.
+    role: { type: String, default: "farmer" },
+    createdAt: { type: Date, default: Date.now },
+  });
+
+  // Ensure plain-text or hashed password is never returned in default JSON representations
+  userSchema.methods.toJSON = function () {
+    const obj = this.toObject();
+    delete obj.password;
+    return obj;
+  };
+
+  const UserModel =
+    (mongoose.models.User as mongoose.Model<IUser>) || mongoose.model<IUser>("User", userSchema);
+
+  // ==========================================
+  // AUTHENTICATION & PASSWORD VALIDATION ROUTES
+  // ==========================================
+
+  // Registration endpoint with strong password validation, bcrypt hashing, and MongoDB storage
+  const handleRegister: RequestHandler = async (req, res): Promise<void> => {
+    try {
+      const { name, email, password, confirmPassword } = req.body || {};
+
+      if (!name || typeof name !== "string" || !name.trim()) {
+        res.status(400).json({ success: false, error: "Full Name is required." });
+        return;
+      }
+
+      if (!email || typeof email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+        res.status(400).json({ success: false, error: "A valid email address is required." });
+        return;
+      }
+
+      // Strong password validation on backend
+      const validation = validatePassword(password || "", confirmPassword !== undefined ? confirmPassword : password);
+
+      if (!validation.isPasswordValid) {
+        res.status(400).json({
+          success: false,
+          error: "Password does not meet complexity requirements.",
+          failedRequirements: validation.failedRequirements,
+          results: validation.results,
+        });
+        return;
+      }
+
+      if (confirmPassword !== undefined && !validation.results.match) {
+        res.status(400).json({
+          success: false,
+          error: "Passwords do not match in the Password and Confirm Password fields.",
+          failedRequirements: ["Passwords must match in both fields"],
+          results: validation.results,
+        });
+        return;
+      }
+
+      // Connect to MongoDB if disconnected
+      if (mongoose.connection.readyState !== 1) {
+        await mongoose.connect(MONGODB_URI, { serverSelectionTimeoutMS: 5000 });
+      }
+
+      const normalizedEmail = email.trim().toLowerCase();
+
+      // Check if user already exists
+      const existingUser = await UserModel.findOne({ email: normalizedEmail });
+      if (existingUser) {
+        res.status(409).json({ success: false, error: "A user with this email address already exists." });
+        return;
+      }
+
+      // Hash password using bcryptjs before saving to MongoDB
+      // Plain-text passwords are NEVER stored or logged!
+      const saltRounds = 10;
+      const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+      const newUser = new UserModel({
+        name: name.trim(),
+        email: normalizedEmail,
+        password: hashedPassword,
+        role: "farmer",
+      });
+
+      await newUser.save();
+      console.log(`[AgriNex Auth] User registered successfully with bcrypt hash (email: ${normalizedEmail})`);
+
+      res.status(201).json({
+        success: true,
+        message: "User registered successfully.",
+        user: {
+          id: newUser._id,
+          name: newUser.name,
+          email: newUser.email,
+          role: newUser.role,
+          createdAt: newUser.createdAt,
+        },
+      });
+    } catch (error: any) {
+      console.error("[AgriNex Auth] Registration error:", error?.message || error);
+      res.status(500).json({ success: false, error: "Registration failed on server." });
+    }
+  };
+
+  app.post("/api/register", handleRegister);
+  app.post("/api/auth/register", handleRegister);
+
+  // Dedicated validation helper endpoint
+  app.post("/api/validate-password", (req, res) => {
+    const { password, confirmPassword } = req.body || {};
+    const validation = validatePassword(password || "", confirmPassword);
+    res.json({
+      success: true,
+      isValid: validation.isFormValid,
+      isPasswordValid: validation.isPasswordValid,
+      results: validation.results,
+      failedRequirements: validation.failedRequirements,
+    });
+  });
+
+  // Login endpoint validating credentials with bcryptjs hash in MongoDB
+  const handleLogin: RequestHandler = async (req, res): Promise<void> => {
+    try {
+      const { email, password } = req.body || {};
+      if (!email || !password) {
+        res.status(400).json({ success: false, error: "Email and password are required." });
+        return;
+      }
+
+      if (mongoose.connection.readyState !== 1) {
+        await mongoose.connect(MONGODB_URI, { serverSelectionTimeoutMS: 5000 });
+      }
+
+      const normalizedEmail = String(email).trim().toLowerCase();
+      const user = await UserModel.findOne({ email: normalizedEmail });
+      if (!user) {
+        res.status(401).json({ success: false, error: "Invalid email or password." });
+        return;
+      }
+
+      const isMatch = await bcrypt.compare(password, user.password);
+      if (!isMatch) {
+        res.status(401).json({ success: false, error: "Invalid email or password." });
+        return;
+      }
+
+      console.log(`[AgriNex Auth] User authenticated via MongoDB bcrypt (email: ${normalizedEmail})`);
+      res.json({
+        success: true,
+        message: "Login successful.",
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+        },
+      });
+    } catch (error: any) {
+      console.error("[AgriNex Auth] Login error:", error?.message || error);
+      res.status(500).json({ success: false, error: "Login failed on server." });
+    }
+  };
+
+  app.post("/api/login", handleLogin);
+  app.post("/api/auth/login", handleLogin);
+
+  // API routes
+  app.post("/api/send-prebooking-report", authenticateFirebase, requireSelfOrAdmin((req) => (req.body?.bookingData ?? req.body)?.userEmail), async (req, res) => {
+    // Accept the current nested payload and the flat payload used by 7921524.
+    const bookingData = req.body?.bookingData ?? req.body;
+    if (!bookingData?.bookingId || !bookingData?.userEmail) {
+      res.status(400).json({ success: false, error: "Booking ID and recipient email are required." });
+      return;
+    }
+
+    try {
+      console.log(`[AgriNex Backend] POST /api/send-prebooking-report booking=${bookingData.bookingId}`);
+      const result = await sendPreBookingReportEmail({
+        bookingId: bookingData.bookingId,
+        userName: bookingData.userName || "Farmer",
+        userEmail: bookingData.userEmail,
+        mobileNumber: bookingData.mobileNumber || "",
+        cropName: bookingData.cropName || "Crop",
+        quantity: bookingData.quantity || 1,
+        unit: bookingData.quantityUnit || bookingData.unit || bookingData.priceUnit || "kg",
+        referencePrice: bookingData.referencePrice || 0,
+        estimatedValue: bookingData.estimatedValue,
+        bookingDate: bookingData.bookingDate || new Date().toLocaleDateString(),
+        bookingTime: bookingData.bookingTime || new Date().toLocaleTimeString(),
+        bookingStatus: bookingData.bookingStatus || bookingData.status || "Pending",
+        preferredLocation: bookingData.preferredLocation,
+        notes: bookingData.notes,
+        t_booking_saved: bookingData.t_booking_saved,
+        t_email_job_started: bookingData.t_email_job_started,
+      });
+
+      if (!result.success) {
+        console.error(`[AgriNex Backend] Booking report email failed: ${result.error || "unknown error"}`);
+        res.status(502).json({ success: false, emailStatus: "failed", error: result.error || "Email delivery failed." });
+        return;
+      }
+
+      console.log(`[AgriNex Backend] Booking report email sent booking=${bookingData.bookingId} provider=${result.provider || "unknown"}`);
+      res.json({ success: true, emailStatus: "sent", messageId: result.messageId, provider: result.provider });
+    } catch (error: any) {
+      console.error("[AgriNex Backend] /api/send-prebooking-report error:", error?.message || error);
+      res.status(500).json({ success: false, emailStatus: "failed", error: "Booking report email could not be sent." });
+    }
+  });
+
+  app.post("/api/send-prebooking-admin-email", authenticateFirebase, requireOwnerOrAdmin((req) => {
+    const bookingData = req.body?.bookingData ?? req.body;
+    return { uid: bookingData?.userId, email: bookingData?.userEmail };
+  }), async (req, res) => {
+    const bookingData = req.body?.bookingData ?? req.body;
+    if (!bookingData?.bookingId) {
+      res.status(400).json({ success: false, error: "Booking data is required." });
+      return;
+    }
+
+    try {
+      const adminEmail = (process.env.ADMIN_EMAIL || "sudharsan9001@gmail.com").trim();
+      const result = await sendPreBookingReportEmail({
+        bookingId: bookingData.bookingId,
+        userName: bookingData.userName || "Farmer",
+        userEmail: adminEmail,
+        mobileNumber: bookingData.mobileNumber || "",
+        cropName: bookingData.cropName || "Crop",
+        quantity: bookingData.quantity || 1,
+        unit: bookingData.quantityUnit || bookingData.unit || bookingData.priceUnit || "kg",
+        referencePrice: bookingData.referencePrice || 0,
+        estimatedValue: bookingData.estimatedValue,
+        bookingDate: bookingData.bookingDate || new Date().toLocaleDateString(),
+        bookingTime: bookingData.bookingTime || new Date().toLocaleTimeString(),
+        bookingStatus: bookingData.bookingStatus || bookingData.status || "Pending",
+        preferredLocation: bookingData.preferredLocation,
+        notes: bookingData.notes,
+      });
+
+      if (!result.success) {
+        console.warn("[AgriNex Backend] Admin pre-booking email failed but booking was preserved:", result.error);
+        res.status(502).json({ success: false, error: result.error || "Admin email failed." });
+        return;
+      }
+
+      res.json({ success: true, emailStatus: "sent", provider: result.provider, messageId: result.messageId });
+    } catch (error: any) {
+      console.warn("[AgriNex Backend] /api/send-prebooking-admin-email failed but booking remains saved:", error?.message || error);
+      res.status(500).json({ success: false, error: "Admin email could not be sent." });
+    }
+  });
+
+  app.post("/api/send-prebooking-retailer-email", authenticateFirebase, requireAdmin, async (req, res) => {
+    const { bookingData, retailerEmail, retailerName } = req.body ?? {};
+    if (!bookingData?.bookingId || !retailerEmail) {
+      res.status(400).json({ success: false, error: "Booking data and retailer email are required." });
+      return;
+    }
+
+    try {
+      console.log(`[AgriNex Backend] POST /api/send-prebooking-retailer-email booking=${bookingData.bookingId} retailer=${retailerEmail}`);
+      const result = await sendPreBookingReportEmail({
+        bookingId: bookingData.bookingId,
+        userName: retailerName ? `${retailerName} (Procurement)` : (bookingData.userName || "Retail Partner"),
+        userEmail: retailerEmail.trim(),
+        mobileNumber: bookingData.mobileNumber || "",
+        cropName: bookingData.cropName || "Crop",
+        quantity: bookingData.quantity || 1,
+        unit: bookingData.quantityUnit || bookingData.unit || bookingData.priceUnit || "kg",
+        referencePrice: bookingData.referencePrice || 0,
+        estimatedValue: bookingData.estimatedValue,
+        bookingDate: bookingData.bookingDate || new Date().toLocaleDateString(),
+        bookingTime: bookingData.bookingTime || new Date().toLocaleTimeString(),
+        bookingStatus: "Approved & Allocated",
+        preferredLocation: bookingData.preferredLocation,
+        notes: `Direct dispatch from AgriNex Administrator to Retailer / Buyer Partner (${retailerName || retailerEmail}).\nFarmer: ${bookingData.userName || 'N/A'} (Contact: ${bookingData.mobileNumber || 'N/A'}).`,
+      });
+
+      if (!result.success) {
+        console.warn(`[AgriNex Backend] Retailer pre-booking email failed: ${result.error}`);
+        res.status(502).json({ success: false, emailStatus: "failed", error: result.error || "Email delivery to retailer failed." });
+        return;
+      }
+
+      console.log(`[AgriNex Backend] Retailer report email sent booking=${bookingData.bookingId} to=${retailerEmail}`);
+      res.json({ success: true, emailStatus: "sent", provider: result.provider, messageId: result.messageId });
+    } catch (error: any) {
+      console.error("[AgriNex Backend] /api/send-prebooking-retailer-email error:", error?.message || error);
+      res.status(500).json({ success: false, emailStatus: "failed", error: "Retailer report email could not be sent." });
+    }
+  });
+
+  app.post("/api/prebooking-report", authenticateFirebase, requireOwnerOrAdmin((req) => {
+    const bookingData = req.body?.bookingData;
+    return { uid: bookingData?.userId, email: bookingData?.userEmail };
+  }), (req, res) => {
+    const bookingData = req.body?.bookingData;
+    if (!bookingData?.bookingId) {
+      res.status(400).json({ error: "Booking data is required." });
+      return;
+    }
+
+    try {
+      const pdfBuffer = generatePreBookingPdfBuffer({
+        bookingId: bookingData.bookingId,
+        userName: bookingData.userName || "Farmer",
+        userEmail: bookingData.userEmail || "N/A",
+        mobileNumber: bookingData.mobileNumber || "N/A",
+        cropName: bookingData.cropName || "N/A",
+        quantity: bookingData.quantity || "N/A",
+        unit: bookingData.quantityUnit || bookingData.priceUnit || "kg",
+        referencePrice: bookingData.referencePrice || "N/A",
+        estimatedValue: bookingData.estimatedValue,
+        bookingDate: bookingData.bookingDate || new Date().toLocaleDateString(),
+        bookingTime: bookingData.bookingTime || "",
+        bookingStatus: bookingData.status || "Pending",
+        preferredLocation: bookingData.preferredLocation,
+        notes: bookingData.notes,
+      });
+
+      res.type("application/pdf");
+      res.setHeader("Content-Disposition", `inline; filename="AgriNex_PreBooking_${bookingData.bookingId}.pdf"`);
+      res.send(pdfBuffer);
+    } catch (error) {
+      console.error("Booking report generation error:", error);
+      res.status(500).json({ error: "Failed to generate booking report." });
+    }
+  });
+
+  app.post("/api/machinery-report", authenticateFirebase, requireOwnerOrAdmin((req) => {
+    const requestData = req.body?.requestData ?? req.body;
+    return { uid: requestData?.farmerId, email: requestData?.farmerEmail };
+  }), (req, res) => {
+    const requestData = req.body?.requestData ?? req.body;
+    if (!requestData?.requestId) {
+      res.status(400).json({ error: "Machinery request data is required." });
+      return;
+    }
+
+    try {
+      const pdfBuffer = generateMachineryPdfBuffer({
+        requestId: requestData.requestId,
+        farmerName: requestData.farmerName || "Farmer",
+        farmerEmail: requestData.farmerEmail || "N/A",
+        farmerPhone: requestData.farmerPhone || "N/A",
+        machineryName: requestData.machineryName || "Agricultural Equipment",
+        machineryType: requestData.machineryType || "Machinery",
+        provider: requestData.provider || "AgriNex Partner",
+        price: requestData.price || 0,
+        rateUnit: requestData.rateUnit || "Day",
+        requiredDate: requestData.requiredDate || new Date().toISOString().split("T")[0],
+        duration: requestData.duration || "1 Day",
+        farmLocation: requestData.farmLocation || "N/A",
+        activity: requestData.activity || "Farming Activity",
+        contractId: requestData.contractId,
+        cropName: requestData.cropName,
+        notes: requestData.notes,
+        status: requestData.status || "Pending Approval",
+      });
+
+      res.type("application/pdf");
+      res.setHeader("Content-Disposition", `inline; filename="AgriNex_Machinery_${requestData.requestId}.pdf"`);
+      res.send(pdfBuffer);
+    } catch (error) {
+      console.error("Machinery report generation error:", error);
+      res.status(500).json({ error: "Failed to generate machinery report." });
+    }
+  });
+
+  app.post("/api/send-machinery-request-admin-email", authenticateFirebase, requireOwnerOrAdmin((req) => {
+    const requestData = req.body?.requestData ?? req.body;
+    return { uid: requestData?.farmerId, email: requestData?.farmerEmail };
+  }), async (req, res) => {
+    const requestData = req.body?.requestData ?? req.body;
+    if (!requestData?.requestId) {
+      res.status(400).json({ success: false, error: "Machinery request data is required." });
+      return;
+    }
+
+    try {
+      const result = await sendMachineryRequestReportEmail({
+        requestId: requestData.requestId,
+        farmerName: requestData.farmerName || "Farmer",
+        farmerEmail: requestData.farmerEmail || "",
+        farmerPhone: requestData.farmerPhone || "",
+        machineryName: requestData.machineryName || "Machinery",
+        machineryType: requestData.machineryType || "Machinery",
+        provider: requestData.provider || "AgriNex Partner",
+        price: requestData.price || 0,
+        rateUnit: requestData.rateUnit || "Day",
+        requiredDate: requestData.requiredDate || new Date().toISOString().split("T")[0],
+        duration: requestData.duration || "1 Day",
+        farmLocation: requestData.farmLocation || "N/A",
+        activity: requestData.activity || "Farming Activity",
+        contractId: requestData.contractId,
+        cropName: requestData.cropName,
+        notes: requestData.notes,
+        status: requestData.status || "Pending Approval",
+      });
+
+      if (!result.success) {
+        console.warn("[AgriNex Backend] Machinery admin email failed but request was preserved:", result.error);
+        res.status(502).json({ success: false, error: result.error || "Admin email failed." });
+        return;
+      }
+
+      res.json({ success: true, emailStatus: "sent", provider: result.provider, messageId: result.messageId });
+    } catch (error: any) {
+      console.warn("[AgriNex Backend] /api/send-machinery-request-admin-email failed but request remains saved:", error?.message || error);
+      res.status(500).json({ success: false, error: "Admin email could not be sent." });
+    }
+  });
+
+  app.post("/api/send-notification-email", authenticateFirebase, requireSelfOrAdmin((req) => req.body?.toEmail), async (req, res) => {
+    const { type, toEmail, userName, title, message, payload } = req.body ?? {};
+    if (!type || !toEmail) {
+      res.status(400).json({ success: false, error: "Notification type and recipient email are required." });
+      return;
+    }
+
+    try {
+      const result = await sendNotificationEmail({
+        type,
+        toEmail,
+        userName: userName || "Farmer",
+        title,
+        message,
+        payload,
+      });
+
+      if (!result.success) {
+        res.status(502).json({ success: false, error: result.error || "Email delivery failed." });
+        return;
+      }
+
+      res.json({ success: true, emailId: result.messageId || result.resendEmailId || null });
+    } catch (error: any) {
+      console.error("[AgriNex Backend] /api/send-notification-email error:", error?.message || error);
+      res.status(500).json({ success: false, error: "Notification email could not be sent." });
+    }
+  });
+
 
   // Initialize Gemini
   let ai: GoogleGenAI | null = null;
   const getAi = () => {
     if (!ai) {
-        const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey) {
-            throw new Error("GEMINI_API_KEY is not defined");
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        throw new Error("GEMINI_API_KEY is not defined");
+      }
+      ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          }
         }
-        ai = new GoogleGenAI({
-            apiKey,
-            httpOptions: {
-              headers: {
-                'User-Agent': 'aistudio-build',
-              }
-            }
-        });
+      });
     }
     return ai;
   };
@@ -54,29 +585,29 @@ async function startServer() {
           "suggestedAction": "string"
         }
       `;
-      
+
       let retries = 0;
       let response;
       while (retries < 3) {
-          try {
-              response = await getAi().models.generateContent({
-                model: "gemini-3.7-flash",
-                contents: prompt,
-                config: {
-                    responseMimeType: "application/json",
-                }
-              });
-              break;
-          } catch (error: any) {
-              if ((error?.status === 503 || error?.code === 503) && retries < 2) {
-                  retries++;
-                  await new Promise(resolve => setTimeout(resolve, 1500));
-                  continue;
-              }
-              throw error;
+        try {
+          response = await getAi().models.generateContent({
+            model: "gemini-3.7-flash",
+            contents: prompt,
+            config: {
+              responseMimeType: "application/json",
+            }
+          });
+          break;
+        } catch (error: any) {
+          if ((error?.status === 503 || error?.code === 503) && retries < 2) {
+            retries++;
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            continue;
           }
+          throw error;
+        }
       }
-      
+
       res.json(JSON.parse(response!.text!));
     } catch (error) {
       console.error("Gemini Error:", error);
@@ -84,213 +615,44 @@ async function startServer() {
     }
   });
 
-  function interpretWeatherCode(code: number): { condition: string; icon: string } {
-    if (code === 0) return { condition: "Clear Sky", icon: "☀️" };
-    if (code === 1 || code === 2) return { condition: "Partly Cloudy", icon: "⛅" };
-    if (code === 3) return { condition: "Overcast", icon: "☁️" };
-    if (code === 45 || code === 48) return { condition: "Fog", icon: "🌫️" };
-    if (code >= 51 && code <= 55) return { condition: "Light Drizzle", icon: "🌦️" };
-    if (code >= 61 && code <= 63) return { condition: "Rain", icon: "🌧️" };
-    if (code === 65) return { condition: "Heavy Rain", icon: "🌧️" };
-    if (code === 80 || code === 81) return { condition: "Rain Showers", icon: "🌦️" };
-    if (code === 82) return { condition: "Violent Rain", icon: "🌧️" };
-    if (code >= 95) return { condition: "Thunderstorm", icon: "⛈️" };
-    return { condition: "Cloudy", icon: "☁️" };
-  }
-
-  app.get("/api/location-search", async (req, res) => {
-    try {
-      const query = ((req.query.query as string) || "").trim();
-      if (!query || query.length < 2) {
-        return res.json([]);
-      }
-
-      const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=8&language=en&format=json`;
-      const response = await axios.get(geoUrl, { timeout: 6000 });
-      const results = (response.data.results || []).map((item: any) => ({
-        id: item.id,
-        name: item.name,
-        latitude: item.latitude,
-        longitude: item.longitude,
-        admin1: item.admin1 || "",
-        country: item.country || "",
-        displayName: [item.name, item.admin1, item.country].filter(Boolean).join(", "),
-      }));
-
-      res.json(results);
-    } catch (error: any) {
-      console.error("[Location Search Error]:", error?.message);
-      const TAMIL_NADU_LOCATIONS = [
-        { id: 1, name: "Chennai", latitude: 13.0827, longitude: 80.2707, admin1: "Tamil Nadu", country: "India", displayName: "Chennai, Tamil Nadu, India" },
-        { id: 2, name: "Madurai", latitude: 9.919, longitude: 78.1195, admin1: "Tamil Nadu", country: "India", displayName: "Madurai, Tamil Nadu, India" },
-        { id: 3, name: "Coimbatore", latitude: 11.0168, longitude: 76.9558, admin1: "Tamil Nadu", country: "India", displayName: "Coimbatore, Tamil Nadu, India" },
-        { id: 4, name: "Salem", latitude: 11.6643, longitude: 78.146, admin1: "Tamil Nadu", country: "India", displayName: "Salem, Tamil Nadu, India" },
-        { id: 5, name: "Tiruchirappalli", latitude: 10.7905, longitude: 78.7047, admin1: "Tamil Nadu", country: "India", displayName: "Tiruchirappalli, Tamil Nadu, India" },
-        { id: 6, name: "Thanjavur", latitude: 10.787, longitude: 79.1378, admin1: "Tamil Nadu", country: "India", displayName: "Thanjavur, Tamil Nadu, India" },
-        { id: 7, name: "Tirunelveli", latitude: 8.7139, longitude: 77.7567, admin1: "Tamil Nadu", country: "India", displayName: "Tirunelveli, Tamil Nadu, India" },
-        { id: 8, name: "Erode", latitude: 11.341, longitude: 77.7172, admin1: "Tamil Nadu", country: "India", displayName: "Erode, Tamil Nadu, India" },
-      ];
-      const q = ((req.query.query as string) || "").toLowerCase();
-      const filtered = TAMIL_NADU_LOCATIONS.filter(l => l.name.toLowerCase().includes(q));
-      res.json(filtered);
-    }
-  });
-
   app.get("/api/weather-data", async (req, res) => {
     try {
-      const lat = parseFloat(req.query.lat as string) || 13.0827;
-      const lng = parseFloat(req.query.lng as string) || 80.2707;
+      const { lat, lng } = req.query;
       const apiKey = process.env.WEATHER_API_KEY;
-
-      // 1. If WEATHER_API_KEY is configured and valid, attempt OpenWeatherMap
-      if (apiKey && apiKey !== "MY_WEATHER_API_KEY") {
-        try {
-          const owmRes = await axios.get(
-            `https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lng}&appid=${apiKey}&units=metric`,
-            { timeout: 5000 }
-          );
-          const data = owmRes.data;
-          const currentRain = data.list[0].rain?.["3h"] ? Number((data.list[0].rain["3h"] / 3).toFixed(1)) : 0;
-          const rainProb = Math.round((data.list[0].pop || 0) * 100);
-          const expectedRain = data.list[0].rain?.["3h"] ? Number(data.list[0].rain["3h"].toFixed(1)) : 0;
-
-          const next6h = data.list.slice(0, 2);
-          const next6hRain = next6h.reduce((sum: number, h: any) => sum + (h.rain?.["3h"] || 0), 0);
-          const next6hMaxProb = Math.max(...next6h.map((h: any) => (h.pop || 0) * 100), 0);
-
-          let rainStatus: "heavy" | "light" | "none" = "none";
-          if (expectedRain >= 5 || rainProb >= 70) rainStatus = "heavy";
-          else if (expectedRain >= 0.5 || rainProb >= 30) rainStatus = "light";
-
-          const farmerAlert = (next6hRain >= 1 || next6hMaxProb >= 40)
-            ? "Rain expected in the next few hours. Consider delaying irrigation."
-            : "No significant rain expected. Irrigation may be required.";
-
-          return res.json({
-            source: "OpenWeatherMap",
-            location: { lat, lng },
-            current: {
-              temp: Math.round(data.list[0].main.temp),
-              condition: data.list[0].weather[0].main,
-              icon: data.list[0].weather[0].main.toLowerCase().includes("rain") ? "🌧️" : "⛅",
-              humidity: data.list[0].main.humidity,
-              windSpeed: Math.round(data.list[0].wind.speed * 3.6),
-              precipitation: currentRain,
-              rainProb,
-              expectedRain,
-              rainStatus,
-              farmerAlert,
-              forecastTime: new Date(data.list[0].dt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-            },
-            hourly: data.list.slice(0, 12).map((h: any) => ({
-              time: new Date(h.dt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-              condition: h.weather[0].main,
-              icon: h.weather[0].main.toLowerCase().includes("rain") ? "🌧️" : "⛅",
-              prob: Math.round((h.pop || 0) * 100),
-              rain: h.rain?.["3h"] ? Number(h.rain["3h"].toFixed(1)) : 0,
-              temp: Math.round(h.main.temp),
-            })),
-            daily: [],
-            lastUpdated: new Date().toISOString(),
-          });
-        } catch (owmErr: any) {
-          console.warn("[Weather API] OpenWeatherMap failed, falling back to Open-Meteo:", owmErr.message);
-        }
+      if (!apiKey) {
+        throw new Error("WEATHER_API_KEY is not defined");
       }
 
-      // 2. High-precision, zero-key institutional real-time weather via Open-Meteo
-      const omUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current=temperature_2m,relative_humidity_2m,precipitation,rain,weather_code,wind_speed_10m&hourly=temperature_2m,precipitation_probability,precipitation,rain,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max&timezone=auto&forecast_days=7`;
-      const omRes = await axios.get(omUrl, { timeout: 8000 });
-      const om = omRes.data;
+      const response = await axios.get(
+        `https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lng}&appid=${apiKey}&units=metric`
+      );
+      const data = response.data;
 
-      const currentWmo = interpretWeatherCode(om.current.weather_code);
-      const curPrecip = Number((om.current.precipitation || 0).toFixed(1));
-
-      // Hourly data starting from current hour
-      const nowIso = new Date().toISOString().slice(0, 13);
-      let startIndex = om.hourly.time.findIndex((t: string) => t.startsWith(nowIso));
-      if (startIndex === -1) startIndex = 0;
-
-      const nextHourly = om.hourly.time.slice(startIndex, startIndex + 24).map((timeStr: string, idx: number) => {
-        const actualIdx = startIndex + idx;
-        const code = om.hourly.weather_code[actualIdx];
-        const info = interpretWeatherCode(code);
-        const d = new Date(timeStr);
-        return {
-          time: d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-          date: d.toLocaleDateString([], { month: "short", day: "numeric" }),
-          condition: info.condition,
-          icon: info.icon,
-          code,
-          prob: om.hourly.precipitation_probability[actualIdx] ?? 0,
-          rain: Number((om.hourly.precipitation[actualIdx] ?? 0).toFixed(1)),
-          temp: Math.round(om.hourly.temperature_2m[actualIdx] ?? 0),
-        };
-      });
-
-      // Next 6 hours rain summary
-      const next6h = nextHourly.slice(0, 6);
-      const next6hRain = next6h.reduce((acc: number, h: any) => acc + h.rain, 0);
-      const next6hMaxProb = Math.max(...next6h.map((h: any) => h.prob), 0);
-      const currentProb = nextHourly[0]?.prob ?? 0;
-      const expectedRainNextHours = Number(next6hRain.toFixed(1));
-
-      let rainStatus: "heavy" | "light" | "none" = "none";
-      if (expectedRainNextHours >= 5 || next6hMaxProb >= 70 || [65, 82, 95, 96, 99].includes(om.current.weather_code)) {
-        rainStatus = "heavy";
-      } else if (expectedRainNextHours >= 0.5 || next6hMaxProb >= 30 || [51, 53, 55, 61, 63, 80, 81].includes(om.current.weather_code)) {
-        rainStatus = "light";
-      }
-
-      const farmerAlert = (next6hRain >= 1 || next6hMaxProb >= 40)
-        ? "Rain expected in the next few hours. Consider delaying irrigation."
-        : "No significant rain expected. Irrigation may be required.";
-
-      // Daily 7-day forecast
-      const dailyForecast = om.daily.time.map((dayStr: string, i: number) => {
-        const code = om.daily.weather_code[i];
-        const info = interpretWeatherCode(code);
-        const d = new Date(dayStr);
-        return {
-          date: dayStr,
-          day: d.toLocaleDateString([], { weekday: "short" }),
-          formattedDate: d.toLocaleDateString([], { month: "short", day: "numeric" }),
-          condition: info.condition,
-          icon: info.icon,
-          tempMax: Math.round(om.daily.temperature_2m_max[i]),
-          tempMin: Math.round(om.daily.temperature_2m_min[i]),
-          rainSum: Number(om.daily.precipitation_sum[i].toFixed(1)),
-          probMax: om.daily.precipitation_probability_max[i] ?? 0,
-        };
-      });
-
-      const forecastTime = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-
-      res.json({
-        source: "Open-Meteo Real-Time",
-        location: { lat, lng },
+      // Transform to our format
+      const weatherData = {
         current: {
-          temp: Math.round(om.current.temperature_2m),
-          condition: currentWmo.condition,
-          icon: currentWmo.icon,
-          humidity: om.current.relative_humidity_2m,
-          windSpeed: Math.round(om.current.wind_speed_10m),
-          precipitation: curPrecip,
-          rainProb: currentProb,
-          expectedRain: expectedRainNextHours,
-          rainStatus,
-          farmerAlert,
-          forecastTime,
+          temp: data.list[0].main.temp,
+          condition: data.list[0].weather[0].main,
+          humidity: data.list[0].main.humidity,
+          windSpeed: data.list[0].wind.speed,
+          rainfall: data.list[0].rain?.['3h'] || 0,
+          rainProb: data.list[0].pop * 100 || 0,
+          expectedRain: data.list[0].rain?.['3h'] || 0
         },
-        hourly: nextHourly,
-        daily: dailyForecast,
-        lastUpdated: new Date().toISOString(),
-      });
-    } catch (error: any) {
-      console.error("[Weather API Error]:", error?.message || error);
-      res.status(500).json({
-        error: "Unable to fetch live weather data. Please check your internet connection or API connection.",
-      });
+        hourly: data.list.slice(0, 7).map((h: any) => ({
+          time: new Date(h.dt * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          condition: h.weather[0].main,
+          prob: h.pop * 100,
+          rain: h.rain?.['3h'] || 0,
+          temp: h.main.temp
+        })),
+        lastUpdated: new Date().toISOString()
+      };
+
+      res.json(weatherData);
+    } catch (error) {
+      console.error("Weather API Error:", error);
+      res.status(500).json({ error: "Unable to fetch live weather data. Please check your internet connection or API connection." });
     }
   });
 
@@ -309,193 +671,6 @@ async function startServer() {
     }
   });
 
-  // Pre-Booking Confirmation Email API endpoint with PDF report attachment
-  app.post("/api/send-prebooking-report", async (req, res) => {
-    const startTime = Date.now();
-    console.log("\n[AgriNex Backend] POST /api/send-prebooking-report received");
-    console.log("Request received");
-
-    // Set a response timeout - always respond within 15 seconds
-    const backendTimeout = setTimeout(() => {
-      if (!res.headersSent) {
-        console.error("[AgriNex] Backend timeout: email request took >15s, sending failure response");
-        res.status(200).json({
-          success: false,
-          emailStatus: "failed",
-          emailError: "Email backend timed out.",
-          error: "Email backend timed out. Confirmation email could not be sent."
-        });
-      }
-    }, 15000);
-
-    try {
-      const {
-        bookingId,
-        userName,
-        userEmail,
-        mobileNumber,
-        cropName,
-        quantity,
-        unit,
-        referencePrice,
-        bookingDate,
-        bookingTime,
-        bookingStatus,
-        preferredLocation,
-        notes,
-        sync,
-        t_booking_saved,
-        t_email_job_started
-      } = req.body;
-
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      const validEmail = typeof userEmail === "string" && emailRegex.test(userEmail.trim());
-
-      console.log(`- Booking ID: ${bookingId || "MISSING"}`);
-      console.log(`- Logged-in user email detected: ${validEmail ? "YES" : "NO"}`);
-      console.log("- Recipient email source: Firebase authenticated user");
-
-      if (!bookingId || !validEmail) {
-        clearTimeout(backendTimeout);
-        return res.status(400).json({
-          success: false,
-          emailStatus: "failed",
-          emailError: !bookingId ? "Missing required bookingId." : "Invalid recipient email address format.",
-          error: !bookingId ? "Missing required bookingId." : "Invalid recipient email address format."
-        });
-      }
-
-      let sendPreBookingReportEmail: any;
-      try {
-        const mailerModule = await import("./src/server/mailer");
-        sendPreBookingReportEmail = mailerModule.sendPreBookingReportEmail;
-      } catch (impErr: any) {
-        clearTimeout(backendTimeout);
-        console.error("Failed to load mailer module:", impErr);
-        return res.status(500).json({
-          success: false,
-          emailStatus: "failed",
-          emailError: `Failed to load email module: ${impErr?.message || impErr}`,
-          error: `Failed to load email module: ${impErr?.message || impErr}`
-        });
-      }
-
-      const emailParams = {
-        bookingId,
-        userName: userName || "Valued Farmer",
-        userEmail,
-        mobileNumber: mobileNumber || "",
-        cropName: cropName || "Crop",
-        quantity: quantity || 1,
-        unit: unit || "kg",
-        referencePrice: referencePrice || 0,
-        bookingDate: bookingDate || new Date().toISOString().split("T")[0],
-        bookingTime: bookingTime || new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        bookingStatus: bookingStatus || "Pre-Booked",
-        preferredLocation: preferredLocation || "",
-        notes: notes || "",
-        t_booking_saved,
-        t_email_job_started
-      };
-
-      // Non-blocking async execution by default for frontend UX (sync === false or undefined)
-      if (sync !== true) {
-        clearTimeout(backendTimeout);
-        // Respond immediately to frontend so booking completes with 0 wait time
-        res.status(200).json({
-          success: true,
-          emailStatus: "processing",
-          message: "Booking received. Processing confirmation email in background.",
-          bookingId
-        });
-
-        // Trigger background processing asynchronously
-        setImmediate(async () => {
-          try {
-            await sendPreBookingReportEmail(emailParams);
-          } catch (bgErr) {
-            console.error("- Background email processing error:", bgErr);
-          }
-        });
-        return;
-      }
-
-      // Synchronous execution for test diagnostics (sync === true)
-      const result = await sendPreBookingReportEmail(emailParams);
-      clearTimeout(backendTimeout);
-
-      if (!res.headersSent) {
-        return res.status(200).json({
-          success: result.success,
-          emailStatus: result.success ? "sent" : "failed",
-          resendEmailId: result.resendEmailId || result.messageId || null,
-          emailError: result.error || null,
-          error: result.error || null,
-          timing: result.timing,
-          message: result.success
-            ? `Confirmation report sent to ${userEmail}`
-            : `Email delivery failed: ${result.error}`,
-          details: result.details
-        });
-      }
-    } catch (error: any) {
-      clearTimeout(backendTimeout);
-      console.error("[AgriNex API Error] /api/send-prebooking-report:", error?.message || error);
-      if (!res.headersSent) {
-        return res.status(500).json({
-          success: false,
-          emailStatus: "failed",
-          emailError: error?.message || "Internal server error during email dispatch.",
-          error: error?.message || "Internal server error during email dispatch."
-        });
-      }
-    }
-  });
-
-  // Test Email endpoint for verification (Step 4 / Step 6)
-  app.post("/api/test-email", async (req, res) => {
-    try {
-      const { toEmail, includePdf } = req.body;
-      const { sendSimpleTestEmail } = await import("./src/server/mailer");
-      const result = await sendSimpleTestEmail(toEmail, Boolean(includePdf));
-      return res.status(result.success ? 200 : 400).json(result);
-    } catch (error: any) {
-      return res.status(500).json({ success: false, error: error?.message || "Test email error." });
-    }
-  });
-
-  // Notification Email API — handles all 5 notification event types
-  // Recipient MUST come from the frontend Firebase authenticated user (never hardcoded)
-  app.post("/api/send-notification-email", async (req, res) => {
-    // Immediately respond 202 so the frontend is never blocked
-    res.status(202).json({ success: true, emailStatus: "processing", message: "Notification email queued." });
-
-    // Fire-and-forget background email dispatch
-    setImmediate(async () => {
-      try {
-        const { type, toEmail, userName, title, message, payload } = req.body;
-
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!type || !toEmail || !emailRegex.test(toEmail)) {
-          console.error("[Notification API] Invalid request — missing type or bad email:", { type, toEmail });
-          return;
-        }
-
-        const { sendNotificationEmail } = await import("./src/server/mailer");
-        const result = await sendNotificationEmail({ type, toEmail, userName, title, message, payload });
-
-        if (result.success) {
-          console.log(`[Notification API] Email sent — type=${type} to=${toEmail} id=${result.resendEmailId}`);
-        } else {
-          console.error(`[Notification API] Email failed — type=${type} to=${toEmail} err=${result.error}`);
-        }
-      } catch (err: any) {
-        console.error("[Notification API] Unexpected error:", err?.message || err);
-      }
-    });
-  });
-
-
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -511,20 +686,8 @@ async function startServer() {
     });
   }
 
-  const server = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`\nAgriNex server running on http://localhost:${PORT}`);
-    console.log(`- Server environment loaded: YES`);
-    console.log(`- RESEND_API_KEY detected: ${Boolean(process.env.RESEND_API_KEY) ? "YES" : "NO"}`);
-    console.log(`- Email API route active: POST /api/send-prebooking-report\n`);
-  });
-
-  server.on("error", (err: any) => {
-    if (err.code === "EADDRINUSE") {
-      console.error(`\n[Server Error] Port ${PORT} is already in use by another running instance.`);
-      console.error(`Please stop previous processes or use: taskkill /F /IM node.exe in PowerShell.\n`);
-    } else {
-      console.error("Server error:", err);
-    }
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT}`);
   });
 }
 

@@ -1,0 +1,13 @@
+{
+  "firestore": [
+    {
+      "database": "(default)",
+      "rules": "firestore.rules",
+      "indexes": "firestore.indexes.json"
+    },
+    {
+      "database": "ai-studio-agrinex-d499a7f0-c357-4880-ac81-ff5bc653b4ef",
+      "rules": "firestore.rules"
+    }
+  ]
+}

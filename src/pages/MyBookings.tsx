@@ -1,138 +1,231 @@
-import React, { useState, useEffect, useRef } from "react";
-import { collection, query, onSnapshot, where, doc, updateDoc, addDoc, serverTimestamp } from "firebase/firestore";
-import emailjs from '@emailjs/browser';
+import React, { useState, useEffect } from "react";
+import { collection, query, onSnapshot, where, orderBy } from "firebase/firestore";
 import { auth, db } from "../lib/firebase";
+import { getFirebaseAuthHeaders } from "../lib/authHelpers";
 import BackButton from "../components/BackButton";
+import { Download, FileText, Calendar, MapPin, CheckCircle2 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 
 const StatusBadge = ({ status }: { status: string }) => {
-    const colors: any = {
-        Pending: "bg-yellow-100 text-yellow-800",
-        Confirmed: "bg-blue-100 text-blue-800",
-        Processing: "bg-purple-100 text-purple-800",
-        Completed: "bg-green-100 text-green-800",
-        Cancelled: "bg-red-100 text-red-800"
-    };
-    return <span className={`text-xs font-bold px-3 py-1 rounded-full ${colors[status] || "bg-gray-100"}`}>{status}</span>;
+  const colors: Record<string, string> = {
+    "Pending Admin Approval": "bg-amber-100 text-amber-900 border border-amber-300",
+    Pending: "bg-amber-100 text-amber-900 border border-amber-300",
+    Approved: "bg-emerald-100 text-emerald-900 border border-emerald-300",
+    "In Progress": "bg-blue-100 text-blue-900 border border-blue-300",
+    "Ready for Delivery": "bg-purple-100 text-purple-900 border border-purple-300",
+    Completed: "bg-teal-100 text-teal-900 border border-teal-300",
+    Rejected: "bg-rose-100 text-rose-900 border border-rose-300",
+  };
+
+  const icons: Record<string, string> = {
+    "Pending Admin Approval": "🟡",
+    Pending: "🟡",
+    Approved: "🟢",
+    "In Progress": "🔵",
+    "Ready for Delivery": "🟣",
+    Completed: "✅",
+    Rejected: "🔴",
+  };
+
+  return (
+    <span className={`text-xs font-bold px-3 py-1 rounded-full ${colors[status] || "bg-gray-100 text-gray-800"}`}>
+      {icons[status] || "○"} {status}
+    </span>
+  );
 };
 
 export default function MyBookings() {
   const [bookings, setBookings] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const previousBookingsRef = useRef<any[]>([]);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const navigate = useNavigate();
 
   useEffect(() => {
     if (!auth.currentUser) return;
-    const q = query(collection(db, "preBookings"), where("userId", "==", auth.currentUser.uid));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-        const newBookings = snapshot.docs.map(doc => ({ firebaseId: doc.id, ...doc.data() } as any));
-        
-        // Check for status changes
-        newBookings.forEach(async (booking) => {
-            const oldBooking = previousBookingsRef.current.find(b => b.firebaseId === booking.firebaseId);
-            if (oldBooking && oldBooking.status !== booking.status) {
-                // Status changed!
-                handleStatusChange(booking, oldBooking.status);
-            }
-        });
+    const q = query(
+      collection(db, "preBookings"),
+      where("userId", "==", auth.currentUser.uid),
+      orderBy("createdAt", "desc")
+    );
 
-        previousBookingsRef.current = newBookings;
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const newBookings: any[] = snapshot.docs.map((d) => ({
+          firebaseId: d.id,
+          ...d.data(),
+        }));
         setBookings(newBookings);
         setLoading(false);
-    });
+      },
+      (err) => {
+        console.warn("[MyBookings] Real-time snapshot notice:", err);
+        // Fallback without ordering in case index is creating
+        const qFallback = query(collection(db, "preBookings"), where("userId", "==", auth.currentUser?.uid));
+        onSnapshot(qFallback, (snap) => {
+          const fallbackList = snap.docs.map((d) => ({ firebaseId: d.id, ...d.data() }));
+          setBookings(fallbackList);
+          setLoading(false);
+        });
+      }
+    );
 
     return () => unsubscribe();
   }, []);
 
-  const handleStatusChange = async (booking: any, oldStatus: string) => {
-      // 1. Add Notification
-      await addDoc(collection(db, "notifications"), {
-          userId: auth.currentUser?.uid,
-          bookingId: booking.bookingId,
-          title: "Booking Status Update",
-          message: `Your ${booking.cropName} booking ${booking.bookingId} has been ${booking.status}.`,
-          status: booking.status,
-          read: false,
-          createdAt: serverTimestamp()
+  const downloadReport = async (booking: any) => {
+    setDownloadingId(booking.bookingId);
+    try {
+      const response = await fetch("/api/prebooking-report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...await getFirebaseAuthHeaders() },
+        body: JSON.stringify({
+          bookingData: {
+            bookingId: booking.bookingId,
+            userName: booking.userName,
+            userEmail: booking.userEmail,
+            mobileNumber: booking.mobileNumber,
+            cropName: booking.cropName,
+            quantity: booking.quantity,
+            quantityUnit: booking.quantityUnit || booking.priceUnit || "kg",
+            referencePrice: booking.referencePrice,
+            estimatedValue: booking.estimatedValue,
+            bookingDate: booking.createdAt?.toDate?.().toLocaleDateString?.() || new Date().toLocaleDateString(),
+            status: booking.status,
+            preferredLocation: booking.preferredLocation,
+            notes: booking.notes,
+          },
+        }),
       });
 
-      // 2. Send Email if not already notified
-      if (booking.lastNotifiedStatus !== booking.status) {
-          try {
-            await emailjs.send(
-                import.meta.env.VITE_EMAILJS_SERVICE_ID,
-                import.meta.env.VITE_EMAILJS_TEMPLATE_ID,
-                {
-                    userName: booking.userName,
-                    bookingId: booking.bookingId,
-                    cropName: booking.cropName,
-                    status: booking.status,
-                    to_email: booking.userEmail
-                },
-                import.meta.env.VITE_EMAILJS_PUBLIC_KEY
-            );
-            // Update lastNotifiedStatus in Firestore
-            await updateDoc(doc(db, "preBookings", booking.firebaseId), { lastNotifiedStatus: booking.status });
-          } catch (e) {
-              console.error("Email failed:", e);
-          }
-      }
-  }
-
-  const handleCancel = async (firebaseId: string) => {
-      if(window.confirm("Are you sure you want to cancel this booking?")) {
-          try {
-            await updateDoc(doc(db, "preBookings", firebaseId), { status: "Cancelled", updatedAt: serverTimestamp() });
-          } catch(e) {
-              console.error(e);
-              alert("Error cancelling booking.");
-          }
-      }
-  }
+      if (!response.ok) throw new Error("Report generation failed.");
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `AgriNex_PreBooking_${booking.bookingId}.pdf`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("[MyBookings] PDF download error:", error);
+      alert("Failed to download report. Please try again.");
+    } finally {
+      setDownloadingId(null);
+    }
+  };
 
   return (
-    <div className="p-6 pb-20 min-h-screen bg-[#F0F7F4]">
+    <div className="p-6 pb-24 min-h-screen bg-[#F0F7F4] text-[#1B4332]">
       <BackButton />
-      <h1 className="text-xl font-black text-[#1B4332] mb-6">📋 My Pre-Bookings</h1>
-      
+      <div className="mb-6">
+        <h1 className="text-2xl font-black text-[#1B4332] mb-1">📋 My Harvest Pre-Bookings</h1>
+        <p className="text-xs text-[#2D6A4F] font-semibold">
+          Track real-time administrative approvals, crop allocations, and official confirmation reports.
+        </p>
+      </div>
+
       {loading ? (
-          <p>Loading bookings...</p>
+        <div className="flex flex-col items-center justify-center p-12 text-center">
+          <div className="w-8 h-8 border-3 border-[#2D6A4F] border-t-transparent rounded-full animate-spin mb-3"></div>
+          <p className="text-xs font-bold text-gray-500">Loading your reservations...</p>
+        </div>
       ) : bookings.length === 0 ? (
-          <p>No pre-bookings found.</p>
+        <div className="bg-white p-10 rounded-3xl border border-gray-100 text-center shadow-sm">
+          <FileText size={36} className="mx-auto text-gray-400 mb-2" />
+          <p className="font-bold text-gray-700 text-sm mb-1">No Pre-Bookings Found</p>
+          <p className="text-xs text-gray-500 mb-4">You have not submitted any harvest pre-bookings yet.</p>
+          <button
+            onClick={() => navigate("/marketplace")}
+            className="bg-[#2D6A4F] hover:bg-[#1B4332] text-white py-2.5 px-6 rounded-full font-bold text-xs shadow-md transition-all"
+          >
+            Explore Marketplace
+          </button>
+        </div>
       ) : (
-          <div className="grid gap-4">
-              {bookings.map(booking => (
-                  <div key={booking.firebaseId} className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm">
-                      <div className="flex justify-between items-center mb-2">
-                        <h2 className="font-bold text-lg text-[#1B4332]">🌾 {booking.cropName}</h2>
-                        <StatusBadge status={booking.status} />
-                      </div>
-                      <p className="text-sm"><strong>Booking ID:</strong> {booking.bookingId}</p>
-                      <p className="text-sm"><strong>Quantity:</strong> {booking.quantity} {booking.priceUnit}</p>
-                      <p className="text-sm"><strong>Reference Price:</strong> ₹{booking.referencePrice} / {booking.priceUnit}</p>
-                      <p className="text-sm"><strong>Location:</strong> {booking.preferredLocation}</p>
-                      <p className="text-sm"><strong>Preferred Date:</strong> {booking.purchaseDate}</p>
-                      <p className="text-sm"><strong>Booking Created:</strong> {booking.createdAt?.toDate().toLocaleString() || "N/A"}</p>
-                      {booking.emailStatus && (
-                        <div className="mt-2 flex items-center gap-1.5 text-xs">
-                          <span className="font-semibold text-gray-500">PDF Email:</span>
-                          {booking.emailStatus === "sent" ? (
-                            <span className="bg-green-100 text-green-800 font-bold px-2 py-0.5 rounded-full">Sent ✅</span>
-                          ) : (booking.emailStatus === "processing" || booking.emailStatus === "sending") ? (
-                            <span className="bg-blue-100 text-blue-800 font-bold px-2 py-0.5 rounded-full">Processing ⏳</span>
-                          ) : booking.emailStatus === "failed" ? (
-                            <span className="bg-red-100 text-red-800 font-bold px-2 py-0.5 rounded-full">Delivery Failed ⚠️</span>
-                          ) : (
-                            <span className="bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded-full">Pending</span>
-                          )}
-                        </div>
-                      )}
-                      
-                      {booking.status === "Pending" && (
-                          <button onClick={() => handleCancel(booking.firebaseId)} className="mt-3 w-full bg-red-50 text-red-600 py-2 rounded-xl font-bold text-sm">Cancel Booking</button>
-                      )}
+        <div className="grid gap-4">
+          {bookings.map((booking) => {
+            const isApproved = booking.status === "Approved";
+            const isPending =
+              booking.status === "Pending" || booking.status === "Pending Admin Approval";
+
+            return (
+              <div
+                key={booking.firebaseId}
+                className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm space-y-3 hover:shadow-md transition-all"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <h2 className="font-black text-lg text-[#1B4332]">🌾 {booking.cropName}</h2>
+                    <p className="text-xs text-gray-500 font-mono mt-0.5">
+                      Booking ID: <strong>{booking.bookingId}</strong>
+                    </p>
                   </div>
-              ))}
-          </div>
+                  <StatusBadge status={booking.status} />
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs bg-[#F0F7F4] p-3 rounded-2xl border border-[#D8F3DC]">
+                  <div>
+                    <span className="text-[10px] uppercase font-bold text-gray-400">Reserved Qty</span>
+                    <p className="font-black text-[#1B4332] mt-0.5">
+                      {booking.quantity} {booking.quantityUnit || booking.priceUnit || "kg"}
+                    </p>
+                  </div>
+                  <div>
+                    <span className="text-[10px] uppercase font-bold text-gray-400">Reference Price</span>
+                    <p className="font-bold text-[#2D6A4F] mt-0.5">
+                      ₹{booking.referencePrice} / {booking.priceUnit || "kg"}
+                    </p>
+                  </div>
+                  <div>
+                    <span className="text-[10px] uppercase font-bold text-gray-400">Est. Total Value</span>
+                    <p className="font-black text-[#1B4332] mt-0.5">
+                      ₹{(booking.estimatedValue || Number(booking.quantity) * Number(booking.referencePrice) || 0).toLocaleString()}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between text-xs text-gray-500 pt-1 gap-2">
+                  <span className="flex items-center gap-1 font-semibold">
+                    <MapPin size={13} className="text-[#2D6A4F]" /> {booking.preferredLocation || "Tamil Nadu"}
+                  </span>
+                  <span className="flex items-center gap-1 font-semibold">
+                    <Calendar size={13} className="text-[#2D6A4F]" /> Harvest Date: {booking.preferredDate || "Flexible"}
+                  </span>
+                </div>
+
+                {isPending && (
+                  <p className="text-[11px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-2xl p-2.5">
+                    ⏳ Status is under administrative review. You will receive your official report once approved.
+                  </p>
+                )}
+
+                {isApproved && (
+                  <p className="text-[11px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-2xl p-2.5 flex items-center gap-1.5">
+                    <CheckCircle2 size={15} className="text-emerald-600 shrink-0" />
+                    Approved & confirmed by Administrator. Official report generated and emailed to your account.
+                  </p>
+                )}
+
+                <div className="pt-2 border-t border-gray-100 flex gap-2">
+                  <button
+                    onClick={() => downloadReport(booking)}
+                    disabled={downloadingId === booking.bookingId}
+                    className="flex-1 bg-[#2D6A4F] hover:bg-[#1B4332] text-white py-2.5 rounded-full font-bold text-xs flex items-center justify-center gap-2 shadow-sm transition-all disabled:opacity-60"
+                  >
+                    <Download size={14} />
+                    {downloadingId === booking.bookingId ? "Generating PDF..." : "Download Official PDF Report"}
+                  </button>
+                  <button
+                    onClick={() => navigate(`/pre-booking-details/${booking.firebaseId}`)}
+                    className="px-4 bg-gray-100 hover:bg-gray-200 text-gray-700 py-2.5 rounded-full font-bold text-xs transition-all"
+                  >
+                    View Timeline
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );

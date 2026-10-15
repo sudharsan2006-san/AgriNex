@@ -3,7 +3,7 @@ import {
   collection, query, where, onSnapshot, orderBy, writeBatch, doc, limit,
 } from "firebase/firestore";
 import { auth, db } from "../lib/firebase";
-import { Bell, BellRing, Check, CheckCheck, CloudRain, ShoppingCart, TrendingUp, FileText, Package, X } from "lucide-react";
+import { Bell, BellRing, Check, CheckCheck, CloudRain, ShoppingCart, TrendingUp, FileText, Package, X, Wrench, CheckCircle2, XCircle } from "lucide-react";
 
 interface Notification {
   id: string;
@@ -44,7 +44,28 @@ const TYPE_CONFIG: Record<string, { icon: React.ReactNode; color: string; bg: st
     color: "text-purple-700",
     bg: "bg-purple-50 border-purple-200",
   },
+  machinery_request: {
+    icon: <Wrench size={16} />,
+    color: "text-indigo-700",
+    bg: "bg-indigo-50 border-indigo-200",
+  },
+  machinery_approved: {
+    icon: <CheckCircle2 size={16} />,
+    color: "text-emerald-700",
+    bg: "bg-emerald-50 border-emerald-200",
+  },
+  machinery_rejected: {
+    icon: <XCircle size={16} />,
+    color: "text-rose-700",
+    bg: "bg-rose-50 border-rose-200",
+  },
+  machinery_completed: {
+    icon: <Check size={16} />,
+    color: "text-teal-700",
+    bg: "bg-teal-50 border-teal-200",
+  },
 };
+
 
 function EmailStatusPill({ status }: { status?: string }) {
   if (!status) return null;

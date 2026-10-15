@@ -1,11 +1,120 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /preBookings/{booking} {
-      allow read, write: if request.auth != null;
+    function isSignedIn() {
+      return request.auth != null;
     }
-    match /notifications/{notification} {
-      allow read, write: if request.auth != null;
+
+    function isAdmin() {
+      return isSignedIn() && request.auth.token.email == 'sudharsan9001@gmail.com';
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // 1. User Profiles & Farm Records
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create, update: if isOwner(userId) || isAdmin();
+      allow delete: if isAdmin();
+
+      match /farmRecords/{recordId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update: if isOwner(userId) || isAdmin();
+        allow delete: if isAdmin();
+      }
+    }
+
+    // 2. Pre-Bookings
+    match /preBookings/{bookingId} {
+      // Normal authenticated user can CREATE their own pending booking
+      allow create: if isSignedIn() &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.status == 'Pending Admin Approval';
+      
+      // Admin or booking owner can READ
+      allow read: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      
+      // Admin can update any field (Approve, Reject, Status changes)
+      // Normal user can only update their own background status tracking fields
+      allow update: if isAdmin() || (
+        isSignedIn() &&
+        resource.data.userId == request.auth.uid &&
+        request.resource.data.userId == resource.data.userId &&
+        request.resource.data.status == resource.data.status &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'emailStatus', 'reportStatus', 'emailSentAt', 'emailError', 'updatedAt', 'lastNotifiedStatus'
+        ])
+      );
+      
+      // Only Admin can DELETE
+      allow delete: if isAdmin();
+    }
+
+    // 3. Machinery Fleet Inventory
+    match /machinery/{machineryId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // 4. Machinery Requests
+    match /machineryRequests/{requestId} {
+      allow create: if isSignedIn() &&
+        request.resource.data.farmerId == request.auth.uid &&
+        request.resource.data.status == 'Pending Approval';
+      allow read: if isAdmin() || (isSignedIn() && resource.data.farmerId == request.auth.uid);
+      allow update: if isAdmin() || (
+        isSignedIn() &&
+        resource.data.farmerId == request.auth.uid &&
+        request.resource.data.farmerId == resource.data.farmerId &&
+        request.resource.data.status == resource.data.status &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'emailStatus', 'emailError', 'updatedAt'
+        ])
+      );
+      allow delete: if isAdmin();
+    }
+
+    // 5. Market / Crop Prices
+    match /marketPrices/{priceId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // 6. Retailers & Buyers
+    match /retailers/{retailerId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // 7. Notifications
+    match /notifications/{notificationId} {
+      allow read: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isAdmin() || (isSignedIn() && request.resource.data.userId == request.auth.uid);
+      allow update: if isAdmin() || (
+        isSignedIn() &&
+        resource.data.userId == request.auth.uid &&
+        request.resource.data.userId == resource.data.userId
+      );
+      allow delete: if isAdmin();
+    }
+
+    // 8. Contracts
+    match /contracts/{contractId} {
+      allow read: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create, update, delete: if isAdmin();
+    }
+
+    // 9. User Reports
+    match /reports/{reportId} {
+      allow read: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isAdmin() || (isSignedIn() && request.resource.data.userId == request.auth.uid);
+      allow update: if isAdmin() || (
+        isSignedIn() &&
+        (resource.data.userId == request.auth.uid || request.resource.data.userId == request.auth.uid)
+      );
+      allow delete: if isAdmin();
     }
   }
 }

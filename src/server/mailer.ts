@@ -1,7 +1,11 @@
 import net from "net";
 import tls from "tls";
 import axios from "axios";
-import { generatePreBookingPdfBuffer, PreBookingReportData } from "./pdfGenerator";
+import { generatePreBookingPdfBuffer, generateMachineryPdfBuffer, PreBookingReportData } from "./pdfGenerator";
+
+export function getAdminEmail(): string {
+  return (process.env.ADMIN_EMAIL || "sudharsan9001@gmail.com").trim();
+}
 
 export interface SendPreBookingEmailParams {
   bookingId: string;
@@ -12,6 +16,7 @@ export interface SendPreBookingEmailParams {
   quantity: string | number;
   unit: string;
   referencePrice: string | number;
+  estimatedValue?: string | number;
   bookingDate: string;
   bookingTime: string;
   bookingStatus: string;
@@ -44,6 +49,26 @@ export interface SendEmailResult {
     resend_req_time_ms: number;
     total_email_proc_time_ms: number;
   };
+}
+
+export interface SendMachineryRequestEmailParams {
+  requestId: string;
+  farmerName: string;
+  farmerEmail: string;
+  farmerPhone: string;
+  machineryName: string;
+  machineryType: string;
+  provider: string;
+  price: number | string;
+  rateUnit: string;
+  requiredDate: string;
+  duration: string;
+  farmLocation: string;
+  activity: string;
+  contractId?: string;
+  cropName?: string;
+  notes?: string;
+  status?: string;
 }
 
 /**
@@ -95,9 +120,13 @@ export async function sendSimpleTestEmail(toEmail: string, includePdf = false): 
     }
   }
 
-  const resendFrom = process.env.RESEND_FROM || "AgriNex <onboarding@resend.dev>";
+  const resendFrom = process.env.RESEND_FROM_EMAIL || process.env.RESEND_FROM || "AgriNex <onboarding@resend.dev>";
+  const senderAddress = resendFrom.match(/<([^>]+)>/)?.[1] || resendFrom;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(senderAddress.trim())) {
+    return { success: false, error: "RESEND_FROM_EMAIL is missing or invalid.", provider: "resend" };
+  }
   const subject = includePdf ? "AgriNex Pre-Booking PDF Test" : "AgriNex Email Test";
-  const textBody = includePdf 
+  const textBody = includePdf
     ? "This is a test email with PDF confirmation from AgriNex.\n\nSmart Farming • Better Tomorrow"
     : "This is a test email from AgriNex.\n\nSmart Farming • Better Tomorrow";
 
@@ -140,6 +169,96 @@ export async function sendSimpleTestEmail(toEmail: string, includePdf = false): 
  * Sends pre-booking confirmation email with PDF attachment.
  * Measures and logs bottleneck performance across all 9 precise execution steps.
  */
+export async function sendMachineryRequestReportEmail(params: SendMachineryRequestEmailParams): Promise<SendEmailResult> {
+  const toEmail = getAdminEmail();
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!toEmail || !emailRegex.test(toEmail)) {
+    return { success: false, error: "Admin email is missing or invalid." };
+  }
+
+  const pdfBuffer = generateMachineryPdfBuffer({
+    requestId: params.requestId,
+    farmerName: params.farmerName || "Farmer",
+    farmerEmail: params.farmerEmail || "N/A",
+    farmerPhone: params.farmerPhone || "N/A",
+    machineryName: params.machineryName || "Agricultural Equipment",
+    machineryType: params.machineryType || "Machinery",
+    provider: params.provider || "AgriNex Partner",
+    price: params.price || 0,
+    rateUnit: params.rateUnit || "Day",
+    requiredDate: params.requiredDate || new Date().toISOString().split("T")[0],
+    duration: params.duration || "1 Day",
+    farmLocation: params.farmLocation || "N/A",
+    activity: params.activity || "Farming Activity",
+    contractId: params.contractId,
+    cropName: params.cropName,
+    notes: params.notes,
+    status: params.status || "Pending Approval",
+  });
+
+  const filename = `AgriNex_Machinery_${params.requestId}.pdf`;
+  const subject = `AgriNex Machinery Request - ${params.requestId}`;
+  const textBody = `AgriNex machinery request received from ${params.farmerName} for ${params.machineryName}.\n\nRequest ID: ${params.requestId}\nDate: ${params.requiredDate}\nActivity: ${params.activity}\nLocation: ${params.farmLocation}\nStatus: ${params.status || "Pending Approval"}`;
+  const htmlBody = `
+    <div style="font-family: Arial, sans-serif; padding: 20px; color: #1B4332;">
+      <h2>AgriNex Machinery Request</h2>
+      <p><strong>Request ID:</strong> ${params.requestId}</p>
+      <p><strong>Farmer:</strong> ${params.farmerName}</p>
+      <p><strong>Email:</strong> ${params.farmerEmail}</p>
+      <p><strong>Phone:</strong> ${params.farmerPhone}</p>
+      <p><strong>Machinery:</strong> ${params.machineryName}</p>
+      <p><strong>Type:</strong> ${params.machineryType}</p>
+      <p><strong>Required Date:</strong> ${params.requiredDate}</p>
+      <p><strong>Activity:</strong> ${params.activity}</p>
+      <p><strong>Status:</strong> ${params.status || "Pending Approval"}</p>
+      <p><strong>Location:</strong> ${params.farmLocation}</p>
+      <p>Attached PDF report for admin review.</p>
+    </div>
+  `;
+
+  const resendApiKey = process.env.RESEND_API_KEY;
+  if (!resendApiKey) {
+    return { success: false, error: "RESEND_API_KEY not configured." };
+  }
+
+  try {
+    const resendFrom = process.env.RESEND_FROM_EMAIL || process.env.RESEND_FROM || "AgriNex <onboarding@resend.dev>";
+    const response = await axios.post(
+      "https://api.resend.com/emails",
+      {
+        from: resendFrom,
+        to: [toEmail],
+        subject,
+        text: textBody,
+        html: htmlBody,
+        attachments: [{ filename, content: pdfBuffer.toString("base64") }],
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${resendApiKey.trim()}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 10000,
+      }
+    );
+
+    return {
+      success: true,
+      messageId: response.data?.id || null,
+      resendEmailId: response.data?.id || null,
+      provider: "resend",
+    };
+  } catch (err: any) {
+    const errorMsg = err.response?.data?.message || err.message || String(err);
+    return {
+      success: false,
+      error: `Resend error: ${errorMsg}`,
+      provider: "resend",
+      details: err.response?.data,
+    };
+  }
+}
+
 export async function sendPreBookingReportEmail(params: SendPreBookingEmailParams): Promise<SendEmailResult> {
   const t_backend_received = Date.now();
   const { bookingId, userName, userEmail, cropName, t_booking_saved, t_email_job_started } = params;
@@ -166,7 +285,7 @@ export async function sendPreBookingReportEmail(params: SendPreBookingEmailParam
   // 4. PDF Generation Start
   const t_pdf_gen_started = Date.now();
   console.log(`4. PDF generation started: ${t_pdf_gen_started}ms`);
-  
+
   let pdfBuffer: Buffer;
   try {
     pdfBuffer = generatePreBookingPdfBuffer(params);
@@ -176,7 +295,7 @@ export async function sendPreBookingReportEmail(params: SendPreBookingEmailParam
     console.log(`==================================================================================\n`);
     return { success: false, error: `PDF generation failed: ${pdfErrMsg}` };
   }
-  
+
   // 5. PDF Generation Completed
   const t_pdf_gen_completed = Date.now();
   const pdf_gen_time_ms = t_pdf_gen_completed - t_pdf_gen_started;
@@ -190,17 +309,26 @@ export async function sendPreBookingReportEmail(params: SendPreBookingEmailParam
   console.log(`6. PDF converted to attachment: ${t_pdf_attachment_ready}ms (Duration: ${attachment_prep_time_ms}ms)`);
 
   const filename = `AgriNex_PreBooking_${bookingId}.pdf`;
-  const subject = `AgriNex Pre-Booking Confirmation - ${bookingId}`;
+  const isApproved = String(params.bookingStatus || "").toLowerCase() === "approved";
+  const subject = isApproved
+    ? `AgriNex Pre-Booking Approved - ${bookingId}`
+    : `AgriNex Pre-Booking Confirmation - ${bookingId}`;
 
   const textBody = `Hello ${userName || "Farmer"},
 
-Your AgriNex Pre-Booking has been successfully submitted.
+${isApproved ? "Great news! Your AgriNex Pre-Booking has been officially Approved by the Administrator." : "Your AgriNex Pre-Booking has been submitted."}
 
 Booking ID: ${bookingId}
+Farmer/User Name: ${userName || "N/A"}
+User Email: ${userEmail}
 Crop: ${cropName}
-Status: Pre-Booked
+Quantity: ${params.quantity} ${params.unit}
+Reference Price: INR ${params.referencePrice} / ${params.unit}
+Estimated Value: INR ${params.estimatedValue ?? "N/A"}
+Booking Date: ${params.bookingDate}
+Booking Status: ${params.bookingStatus || (isApproved ? "Approved" : "Pending Admin Approval")}
 
-Your Pre-Booking confirmation report is attached as a PDF.
+Your official Pre-Booking confirmation report is attached as a PDF.
 
 Thank you for using AgriNex.
 
@@ -217,16 +345,21 @@ Smart Farming • Better Tomorrow`;
   </div>
   <div style="background-color: #ffffff; padding: 28px; border: 1px solid #E2E8F0; border-radius: 16px; margin-top: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.03);">
     <p style="font-size: 16px; color: #2D3748;">Hello <strong>${userName || "Farmer"}</strong>,</p>
-    <p style="color: #4A5568;">Your AgriNex Pre-Booking has been successfully submitted.</p>
+    <p style="color: #4A5568;">${isApproved ? "🎉 <strong>Great news!</strong> Your AgriNex Pre-Booking has been officially Approved by the Administrator." : "Your AgriNex Pre-Booking has been successfully submitted."}</p>
     
     <div style="background-color: #F0F7F4; border-left: 4px solid #2D6A4F; padding: 16px; margin: 20px 0; border-radius: 8px;">
       <p style="margin: 4px 0; color: #1B4332;"><strong>Booking ID:</strong> ${bookingId}</p>
       <p style="margin: 4px 0; color: #1B4332;"><strong>Crop:</strong> ${cropName}</p>
+      <p style="margin: 4px 0; color: #1B4332;"><strong>Farmer:</strong> ${userName || "N/A"}</p>
+      <p style="margin: 4px 0; color: #1B4332;"><strong>Email:</strong> ${userEmail}</p>
       <p style="margin: 4px 0; color: #1B4332;"><strong>Quantity:</strong> ${params.quantity} ${params.unit}</p>
-      <p style="margin: 4px 0; color: #1B4332;"><strong>Status:</strong> <span style="color: #2D6A4F; font-weight: bold; background: #D8F3DC; padding: 2px 8px; border-radius: 12px; font-size: 12px;">Pre-Booked</span></p>
+      <p style="margin: 4px 0; color: #1B4332;"><strong>Reference Price:</strong> INR ${params.referencePrice} / ${params.unit}</p>
+      <p style="margin: 4px 0; color: #1B4332;"><strong>Estimated Value:</strong> INR ${params.estimatedValue ?? "N/A"}</p>
+      <p style="margin: 4px 0; color: #1B4332;"><strong>Booking Date:</strong> ${params.bookingDate}</p>
+      <p style="margin: 4px 0; color: #1B4332;"><strong>Status:</strong> <span style="color: ${isApproved ? '#15803d' : '#854d0e'}; font-weight: bold; background: ${isApproved ? '#dcfce7' : '#fef9c3'}; padding: 3px 10px; border-radius: 12px; font-size: 12px;">${params.bookingStatus || (isApproved ? 'Approved' : 'Pending')}</span></p>
     </div>
 
-    <p style="color: #4A5568;">Your official Pre-Booking confirmation report is attached to this email as a PDF (<strong>${filename}</strong>).</p>
+    <p style="color: #4A5568;">Your official approved Pre-Booking report is attached to this email as a PDF (<strong>${filename}</strong>). You can also view and download it anytime directly in your AgriNex account.</p>
     
     <hr style="border: none; border-top: 1px solid #EDF2F7; margin: 24px 0;" />
     
@@ -240,7 +373,12 @@ Smart Farming • Better Tomorrow`;
   if (resendApiKey) {
     const t_resend_req_started = Date.now();
     console.log(`7. Resend API request started: ${t_resend_req_started}ms (URL: https://api.resend.com/emails)`);
-    const resendFrom = process.env.RESEND_FROM || "AgriNex <onboarding@resend.dev>";
+    const resendFrom = process.env.RESEND_FROM_EMAIL || process.env.RESEND_FROM || "AgriNex <onboarding@resend.dev>";
+
+    const senderAddress = resendFrom.match(/<([^>]+)>/)?.[1] || resendFrom;
+    if (!emailRegex.test(senderAddress.trim())) {
+      return { success: false, error: "RESEND_FROM_EMAIL is missing or invalid.", provider: "resend" };
+    }
 
     try {
       const resendResponse = await axios.post(
@@ -343,7 +481,7 @@ Smart Farming • Better Tomorrow`;
   const smtpHost = process.env.EMAIL_HOST || "smtp.gmail.com";
   const smtpPort = parseInt(process.env.EMAIL_PORT || "587", 10);
   const smtpUser = process.env.EMAIL_USER || "";
-  const smtpPassword = process.env.EMAIL_PASSWORD || "";
+  const smtpPassword = process.env.EMAIL_PASSWORD || process.env.EMAIL_PASS || "";
   const smtpFrom = process.env.EMAIL_FROM || (smtpUser ? `AgriNex <${smtpUser}>` : "AgriNex <no-reply@agrinex.com>");
 
   if (smtpUser && smtpPassword) {
@@ -677,11 +815,11 @@ function buildNotificationHtml(params: NotificationEmailParams): { subject: stri
       const inner = `
         <p style="color:#4A5568;">Your pre-booking has been <strong>confirmed</strong> on AgriNex.</p>
         ${infoBox([
-          `<strong>Booking ID:</strong> ${payload.bookingId || "—"}`,
-          `<strong>Crop Name:</strong> ${payload.cropName || "—"}`,
-          `<strong>Quantity:</strong> ${payload.quantity || "—"} ${payload.unit || ""}`,
-          `<strong>Status:</strong> ${pill("Confirmed")}`,
-        ])}
+        `<strong>Booking ID:</strong> ${payload.bookingId || "—"}`,
+        `<strong>Crop Name:</strong> ${payload.cropName || "—"}`,
+        `<strong>Quantity:</strong> ${payload.quantity || "—"} ${payload.unit || ""}`,
+        `<strong>Status:</strong> ${pill("Confirmed")}`,
+      ])}
         <p style="color:#4A5568;">You will receive further updates as your order progresses.</p>`;
       return {
         subject,
@@ -699,11 +837,11 @@ function buildNotificationHtml(params: NotificationEmailParams): { subject: stri
       const inner = `
         <p style="color:#4A5568;">Your booking status has been updated.</p>
         ${infoBox([
-          `<strong>Booking ID:</strong> ${payload.bookingId || "—"}`,
-          `<strong>Crop:</strong> ${payload.cropName || "—"}`,
-          `<strong>Previous Status:</strong> ${payload.prevStatus || "—"}`,
-          `<strong>New Status:</strong> ${pill(payload.status || "Updated", newColor)}`,
-        ])}
+        `<strong>Booking ID:</strong> ${payload.bookingId || "—"}`,
+        `<strong>Crop:</strong> ${payload.cropName || "—"}`,
+        `<strong>Previous Status:</strong> ${payload.prevStatus || "—"}`,
+        `<strong>New Status:</strong> ${pill(payload.status || "Updated", newColor)}`,
+      ])}
         <p style="color:#4A5568;">Log in to AgriNex to view your updated booking details.</p>`;
       return {
         subject,
@@ -740,11 +878,11 @@ function buildNotificationHtml(params: NotificationEmailParams): { subject: stri
       const inner = `
         <p style="color:#4A5568;">There has been a market price update in AgriNex.</p>
         ${infoBox([
-          `<strong>Commodity:</strong> ${payload.commodity || "—"}`,
-          `<strong>Previous Price:</strong> ₹${payload.prevPrice || "—"} ${payload.priceUnit || ""}`,
-          `<strong>Current Price:</strong> ₹${payload.newPrice || "—"} ${payload.priceUnit || ""}`,
-          `<strong>Change:</strong> <span style="color:${arrowColor};font-weight:bold;">${arrow}</span>`,
-        ])}
+        `<strong>Commodity:</strong> ${payload.commodity || "—"}`,
+        `<strong>Previous Price:</strong> ₹${payload.prevPrice || "—"} ${payload.priceUnit || ""}`,
+        `<strong>Current Price:</strong> ₹${payload.newPrice || "—"} ${payload.priceUnit || ""}`,
+        `<strong>Change:</strong> <span style="color:${arrowColor};font-weight:bold;">${arrow}</span>`,
+      ])}
         <p style="color:#4A5568;">Visit AgriNex Marketplace for the latest crop prices.</p>`;
       return {
         subject,
@@ -758,10 +896,10 @@ function buildNotificationHtml(params: NotificationEmailParams): { subject: stri
       const inner = `
         <p style="color:#4A5568;">Your AgriNex pre-booking report is ready.</p>
         ${infoBox([
-          `<strong>Booking ID:</strong> ${payload.bookingId || "—"}`,
-          `<strong>Crop:</strong> ${payload.cropName || "—"}`,
-          `<strong>Status:</strong> ${pill(payload.status || "Pre-Booked")}`,
-        ])}
+        `<strong>Booking ID:</strong> ${payload.bookingId || "—"}`,
+        `<strong>Crop:</strong> ${payload.cropName || "—"}`,
+        `<strong>Status:</strong> ${pill(payload.status || "Pre-Booked")}`,
+      ])}
         <p style="color:#4A5568;">Your detailed PDF confirmation has been sent as a separate attachment email.</p>`;
       return {
         subject,

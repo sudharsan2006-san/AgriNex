@@ -12,6 +12,7 @@ export interface PreBookingReportData {
   quantity: string | number;
   unit: string;
   referencePrice: string | number;
+  estimatedValue?: string | number;
   bookingDate: string;
   bookingTime: string;
   bookingStatus: string;
@@ -209,6 +210,13 @@ export function generatePreBookingPdfBuffer(data: PreBookingReportData): Buffer 
   setFillColor(0.106, 0.263, 0.196);
   drawText("F1", 11, 160, dY, `INR ${data.referencePrice} / ${data.unit}`);
 
+  // Estimated booking value
+  dY -= rowH;
+  setFillColor(0.35, 0.45, 0.40);
+  drawText("F2", 10, 55, dY, "Estimated Value:");
+  setFillColor(0.106, 0.263, 0.196);
+  drawText("F1", 11, 160, dY, `INR ${data.estimatedValue ?? "N/A"}`);
+
   // Preferred Location
   dY -= rowH;
   setFillColor(0.35, 0.45, 0.40);
@@ -288,3 +296,43 @@ export function generatePreBookingPdfBuffer(data: PreBookingReportData): Buffer 
 
   return Buffer.from(pdfOutput, "utf8");
 }
+
+export interface MachineryReportData {
+  requestId: string;
+  farmerName: string;
+  farmerEmail: string;
+  farmerPhone: string;
+  machineryName: string;
+  machineryType: string;
+  provider: string;
+  price: number | string;
+  rateUnit: string;
+  requiredDate: string;
+  duration: string;
+  farmLocation: string;
+  activity: string;
+  contractId?: string;
+  cropName?: string;
+  notes?: string;
+  status: string;
+}
+
+export function generateMachineryPdfBuffer(data: MachineryReportData): Buffer {
+  return generatePreBookingPdfBuffer({
+    bookingId: data.requestId,
+    userName: data.farmerName,
+    userEmail: data.farmerEmail || "N/A",
+    mobileNumber: data.farmerPhone || "N/A",
+    cropName: `${data.machineryName} (${data.machineryType}) - ${data.activity}`,
+    quantity: data.duration,
+    unit: "Duration",
+    referencePrice: data.price,
+    estimatedValue: `₹${data.price} / ${data.rateUnit}`,
+    bookingDate: data.requiredDate,
+    bookingTime: `Location: ${data.farmLocation}`,
+    bookingStatus: data.status,
+    preferredLocation: data.farmLocation,
+    notes: data.contractId ? `Linked Contract: #${data.contractId} | Notes: ${data.notes || "None"}` : data.notes,
+  });
+}
+

@@ -1,12 +1,17 @@
 import { addDoc, collection, serverTimestamp, doc, updateDoc } from "firebase/firestore";
 import { auth, db } from "../lib/firebase";
+import { getFirebaseAuthHeaders } from "../lib/authHelpers";
 
 export type NotificationType =
   | "booking_confirmed"
   | "booking_status"
   | "rain_alert"
   | "price_alert"
-  | "pdf_report";
+  | "pdf_report"
+  | "machinery_request"
+  | "machinery_approved"
+  | "machinery_rejected"
+  | "machinery_completed";
 
 export interface NotificationPayload {
   bookingId?: string;
@@ -23,6 +28,11 @@ export interface NotificationPayload {
   prevPrice?: number;
   newPrice?: number;
   priceUnit?: string;
+  machineryId?: string;
+  machineryName?: string;
+  machineryType?: string;
+  requestId?: string;
+  requiredDate?: string;
   [key: string]: any;
 }
 
@@ -31,7 +41,11 @@ interface CreateNotificationParams {
   title: string;
   message: string;
   payload?: NotificationPayload;
+  targetUserId?: string;
+  targetUserEmail?: string;
+  recipientName?: string;
 }
+
 
 /**
  * Unified notification creator.
@@ -44,23 +58,27 @@ export async function createNotification({
   title,
   message,
   payload = {},
+  targetUserId,
+  targetUserEmail,
+  recipientName,
 }: CreateNotificationParams): Promise<void> {
   const user = auth.currentUser;
-  if (!user || !user.email) {
-    console.warn("[NotificationService] No authenticated user — skipping notification.");
+  const effectiveUserId = targetUserId || user?.uid;
+  const effectiveUserEmail = targetUserEmail || user?.email;
+
+  if (!effectiveUserId) {
+    console.warn("[NotificationService] No target or authenticated user — skipping notification.");
     return;
   }
 
-  const userEmail = user.email;
-  const userId = user.uid;
-  const userName = user.displayName || "Farmer";
+  const userName = recipientName || user?.displayName || "Farmer";
 
   // 1. Write to Firestore immediately (shows in bell instantly)
   let notifDocRef: any = null;
   try {
     notifDocRef = await addDoc(collection(db, "notifications"), {
-      userId,
-      userEmail,
+      userId: effectiveUserId,
+      userEmail: effectiveUserEmail || "",
       title,
       message,
       type,
@@ -74,6 +92,7 @@ export async function createNotification({
     return;
   }
 
+
   // 2. Fire email async — do NOT await, so the UI is never blocked
   (async () => {
     try {
@@ -84,10 +103,10 @@ export async function createNotification({
 
       const res = await fetch("/api/send-notification-email", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...await getFirebaseAuthHeaders() },
         body: JSON.stringify({
           type,
-          toEmail: userEmail,
+          toEmail: effectiveUserEmail,
           userName,
           title,
           message,
@@ -121,7 +140,7 @@ export async function createNotification({
           emailStatus: "failed",
           emailError: err?.message || String(err),
         });
-      } catch {}
+      } catch { }
     }
   })();
 }

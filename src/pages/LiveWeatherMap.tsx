@@ -48,8 +48,9 @@ function RadarLayer({ timestamp, enabled }: { timestamp: number | null; enabled:
     const layer = L.tileLayer(
       `https://tilecache.rainviewer.com/v2/radar/${timestamp}/256/{z}/{x}/{y}/2/1_1.png`,
       {
-        opacity: 0.7,
+        opacity: 0.65,
         minZoom: 2,
+        maxNativeZoom: 7,
         maxZoom: 18,
         errorTileUrl: "",
       }

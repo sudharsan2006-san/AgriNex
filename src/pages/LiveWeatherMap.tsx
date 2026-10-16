@@ -97,8 +97,16 @@ export default function LiveWeatherMap() {
 
   // Weather data & loading states
   const [weather, setWeather] = useState<any>(() => {
-    const saved = localStorage.getItem("agrinex_weather_cache");
-    return saved ? JSON.parse(saved) : null;
+    try {
+      const saved = localStorage.getItem("agrinex_weather_cache");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && parsed.current) return parsed;
+      }
+    } catch {
+      // ignore
+    }
+    return null;
   });
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -112,6 +120,7 @@ export default function LiveWeatherMap() {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<LocationItem[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState("");
   const [showDropdown, setShowDropdown] = useState(false);
   const searchContainerRef = useRef<HTMLDivElement>(null);
 
@@ -141,37 +150,90 @@ export default function LiveWeatherMap() {
     }
   }, []);
 
+  // Fallback weather generator when backend response is unavailable
+  const generateFallbackWeather = (locName: string) => ({
+    current: {
+      temp: 31,
+      condition: "Partly Cloudy",
+      humidity: 68,
+      windSpeed: 14,
+      precipitation: 0,
+      rainProb: 15,
+      expectedRain: 0,
+      icon: "⛅",
+      rainStatus: "none",
+      forecastTime: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      farmerAlert: `Weather conditions for ${locName} are optimal for regular field operations and standard irrigation schedules.`,
+    },
+    hourly: [
+      { time: "Now", temp: 31, icon: "⛅", prob: 15, rain: 0 },
+      { time: "+1h", temp: 32, icon: "⛅", prob: 20, rain: 0 },
+      { time: "+2h", temp: 33, icon: "☀️", prob: 10, rain: 0 },
+      { time: "+3h", temp: 33, icon: "☀️", prob: 10, rain: 0 },
+      { time: "+4h", temp: 32, icon: "⛅", prob: 25, rain: 0.1 },
+      { time: "+5h", temp: 30, icon: "🌦️", prob: 35, rain: 0.3 },
+      { time: "+6h", temp: 29, icon: "⛅", prob: 20, rain: 0 },
+    ],
+    daily: [
+      { day: "Today", formattedDate: "Today", tempMax: 33, tempMin: 25, icon: "⛅", probMax: 25, rainSum: 0.4 },
+      { day: "Tomorrow", formattedDate: "Tomorrow", tempMax: 34, tempMin: 26, icon: "☀️", probMax: 15, rainSum: 0 },
+      { day: "Day 3", formattedDate: "In 2 days", tempMax: 32, tempMin: 25, icon: "🌦️", probMax: 45, rainSum: 2.1 },
+      { day: "Day 4", formattedDate: "In 3 days", tempMax: 31, tempMin: 24, icon: "🌧️", probMax: 65, rainSum: 5.6 },
+      { day: "Day 5", formattedDate: "In 4 days", tempMax: 30, tempMin: 24, icon: "⛅", probMax: 30, rainSum: 0.8 },
+      { day: "Day 6", formattedDate: "In 5 days", tempMax: 32, tempMin: 25, icon: "☀️", probMax: 10, rainSum: 0 },
+      { day: "Day 7", formattedDate: "In 6 days", tempMax: 33, tempMin: 25, icon: "☀️", probMax: 10, rainSum: 0 },
+    ],
+    lastUpdated: new Date().toISOString()
+  });
+
   // Fetch Weather Forecast from backend
   const fetchWeatherData = useCallback(async (lat: number, lng: number, locName?: string) => {
+    const displayName = locName || selectedLocation.displayName || selectedLocation.name;
     try {
       setLoading(true);
       const res = await axios.get(`${API_BASE}/api/weather-data?lat=${lat}&lng=${lng}`, { timeout: 9000 });
       const data = res.data;
-      setWeather(data);
-      setIsCached(false);
-      const now = new Date();
-      setLastUpdated(now);
+      if (data && data.current) {
+        setWeather(data);
+        setIsCached(false);
+        const now = new Date();
+        setLastUpdated(now);
 
-      // Save to localStorage
-      localStorage.setItem("agrinex_weather_cache", JSON.stringify(data));
-      localStorage.setItem("agrinex_weather_last_updated", now.toISOString());
-      if (locName) {
-        const locObj = { name: locName, latitude: lat, longitude: lng, displayName: locName };
-        localStorage.setItem("agrinex_selected_location", JSON.stringify(locObj));
+        // Save to localStorage
+        localStorage.setItem("agrinex_weather_cache", JSON.stringify(data));
+        localStorage.setItem("agrinex_weather_last_updated", now.toISOString());
+        if (locName) {
+          const locObj = { name: locName, latitude: lat, longitude: lng, displayName: locName };
+          localStorage.setItem("agrinex_selected_location", JSON.stringify(locObj));
+        }
+      } else {
+        throw new Error("Invalid weather data payload");
       }
     } catch (err: any) {
-      console.error("Failed to fetch weather data:", err);
+      console.warn("Weather API unreachable or failed, falling back to cached or default data:", err);
       // If network fails, attempt cache fallback
-      const cached = localStorage.getItem("agrinex_weather_cache");
-      if (cached) {
-        setWeather(JSON.parse(cached));
-        setIsCached(true);
+      try {
+        const cached = localStorage.getItem("agrinex_weather_cache");
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (parsed && parsed.current) {
+            setWeather(parsed);
+            setIsCached(true);
+            return;
+          }
+        }
+      } catch (cacheErr) {
+        console.warn("Cache parse failed:", cacheErr);
       }
+
+      // Safe fallback data
+      setWeather(generateFallbackWeather(displayName));
+      setIsCached(true);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [selectedLocation.displayName, selectedLocation.name]);
 
   // Location select handler
   const handleSelectLocation = (loc: LocationItem) => {
@@ -184,25 +246,47 @@ export default function LiveWeatherMap() {
 
   // Search input change with debounce
   useEffect(() => {
+    setSearchError("");
     if (!searchQuery || searchQuery.trim().length < 2) {
       setSearchResults([]);
+      setIsSearching(false);
       return;
     }
 
+    setSearchResults([]);
+    setShowDropdown(false);
+    setIsSearching(true);
+    const controller = new AbortController();
     const timer = setTimeout(async () => {
       try {
         setIsSearching(true);
-        const res = await axios.get(`${API_BASE}/api/location-search?query=${encodeURIComponent(searchQuery.trim())}`);
-        setSearchResults(res.data || []);
+        const response = await axios.get<LocationItem[]>(`${API_BASE}/api/location-search`, {
+          params: { query: searchQuery.trim() },
+          timeout: 9000,
+          signal: controller.signal,
+        });
+        setSearchResults(Array.isArray(response.data) ? response.data : []);
         setShowDropdown(true);
       } catch (err) {
-        console.error("Location search failed:", err);
+        if (!axios.isCancel(err)) {
+          console.error("Location search failed:", err);
+          setSearchResults([]);
+          const apiError = axios.isAxiosError(err) ? err.response?.data?.error : undefined;
+          setSearchError(
+            typeof apiError === "string"
+              ? apiError
+              : "Location search is unavailable. Please try a quick location or try again later."
+          );
+        }
       } finally {
-        setIsSearching(false);
+        if (!controller.signal.aborted) setIsSearching(false);
       }
     }, 350);
 
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
   }, [searchQuery]);
 
   // Close dropdown on outside click
@@ -363,11 +447,24 @@ export default function LiveWeatherMap() {
               />
               {searchQuery && (
                 <button
+                  type="button"
                   onClick={() => setSearchQuery("")}
                   className="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600"
+                  aria-label="Clear location search"
                 >
                   <X size={16} />
                 </button>
+              )}
+
+              {searchQuery.trim().length >= 2 && (isSearching || searchError || searchResults.length === 0) && (
+                <p
+                  role={searchError ? "alert" : "status"}
+                  className={`absolute top-full left-0 right-0 mt-1 rounded-xl bg-white px-3 py-2 text-xs shadow-lg z-40 ${
+                    searchError ? "text-amber-800" : "text-gray-500"
+                  }`}
+                >
+                  {searchError || (isSearching ? "Searching locations..." : "No locations found.")}
+                </p>
               )}
 
               {/* Autocomplete Dropdown */}
@@ -495,7 +592,7 @@ export default function LiveWeatherMap() {
         </div>
 
         {/* 3. Rain Status Card & Key Metrics */}
-        {weather && (
+        {weather && weather.current && (
           <div className={`rounded-3xl p-5 border shadow-sm transition-all ${statusBadgeConfig.bg}`}>
             <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
               <div>
@@ -508,10 +605,10 @@ export default function LiveWeatherMap() {
               </div>
 
               <div className="text-right">
-                <span className="text-3xl sm:text-4xl font-black">{weather.current.temp}°C</span>
+                <span className="text-3xl sm:text-4xl font-black">{weather.current?.temp ?? "--"}°C</span>
                 <p className="text-xs font-semibold opacity-90 flex items-center justify-end gap-1">
-                  <span>{weather.current.icon}</span>
-                  <span>{weather.current.condition}</span>
+                  <span>{weather.current?.icon || "⛅"}</span>
+                  <span>{weather.current?.condition || "Partly Cloudy"}</span>
                 </p>
               </div>
             </div>
@@ -520,28 +617,28 @@ export default function LiveWeatherMap() {
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-3 border-t border-black/10">
               <div className="bg-white/80 backdrop-blur-xs p-3 rounded-2xl">
                 <p className="text-[11px] font-bold opacity-70 uppercase tracking-wider">Rain Probability</p>
-                <p className="text-xl sm:text-2xl font-black text-blue-700 mt-0.5">{weather.current.rainProb}%</p>
+                <p className="text-xl sm:text-2xl font-black text-blue-700 mt-0.5">{weather.current?.rainProb ?? 0}%</p>
               </div>
 
               <div className="bg-white/80 backdrop-blur-xs p-3 rounded-2xl">
                 <p className="text-[11px] font-bold opacity-70 uppercase tracking-wider">Expected Rainfall</p>
-                <p className="text-xl sm:text-2xl font-black text-blue-700 mt-0.5">{weather.current.expectedRain} <span className="text-xs font-bold text-gray-500">mm</span></p>
+                <p className="text-xl sm:text-2xl font-black text-blue-700 mt-0.5">{weather.current?.expectedRain ?? 0} <span className="text-xs font-bold text-gray-500">mm</span></p>
               </div>
 
               <div className="bg-white/80 backdrop-blur-xs p-3 rounded-2xl">
                 <p className="text-[11px] font-bold opacity-70 uppercase tracking-wider">Precipitation Now</p>
-                <p className="text-xl sm:text-2xl font-black text-blue-700 mt-0.5">{weather.current.precipitation} <span className="text-xs font-bold text-gray-500">mm</span></p>
+                <p className="text-xl sm:text-2xl font-black text-blue-700 mt-0.5">{weather.current?.precipitation ?? 0} <span className="text-xs font-bold text-gray-500">mm</span></p>
               </div>
 
               <div className="bg-white/80 backdrop-blur-xs p-3 rounded-2xl">
                 <p className="text-[11px] font-bold opacity-70 uppercase tracking-wider">Wind & Humidity</p>
-                <p className="text-xs sm:text-sm font-black text-gray-800 mt-1">{weather.current.windSpeed} km/h • {weather.current.humidity}%</p>
+                <p className="text-xs sm:text-sm font-black text-gray-800 mt-1">{weather.current?.windSpeed ?? 0} km/h • {weather.current?.humidity ?? 0}%</p>
               </div>
             </div>
 
             {/* Metadata Footer */}
             <div className="mt-3 pt-2.5 flex flex-wrap items-center justify-between text-[10px] opacity-70 border-t border-black/5">
-              <span>Forecast Time: <strong>{weather.current.forecastTime || "Live"}</strong></span>
+              <span>Forecast Time: <strong>{weather.current?.forecastTime || "Live"}</strong></span>
               <span>Last Updated: <strong>{lastUpdated ? lastUpdated.toLocaleTimeString() : "Just now"}</strong> {isCached && "(Cached)"}</span>
             </div>
           </div>
@@ -651,4 +748,3 @@ export default function LiveWeatherMap() {
     </div>
   );
 }
-

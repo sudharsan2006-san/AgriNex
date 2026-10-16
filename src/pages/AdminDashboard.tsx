@@ -17,7 +17,6 @@ import {
 import { signOut } from "firebase/auth";
 import { db, auth } from "../lib/firebase";
 import { ADMIN_EMAIL, getFirebaseAuthHeaders, isAdminUserEmail } from "../lib/authHelpers";
-import { API_BASE } from "../lib/apiBase";
 import {
   MachineryItem,
   MachineryRequest,
@@ -527,21 +526,22 @@ export default function AdminDashboard({ initialSection }: AdminDashboardProps =
           });
 
           const ownerSnapshot = await getDoc(doc(db, "users", booking.userId));
-          const registeredEmail = ownerSnapshot.exists() ? ownerSnapshot.data().email : null;
+          const ownerData = ownerSnapshot.exists() ? ownerSnapshot.data() : null;
+          const registeredEmail = ownerData?.email;
           if (!registeredEmail) {
             throw Object.assign(new Error("The booking owner's registered email is unavailable."), {
               code: "owner-email-missing",
             });
           }
 
-          const response = await fetch(`${API_BASE}/api/send-prebooking-report`, {
+          const response = await fetch("/api/send-prebooking-report", {
             method: "POST",
             headers: { "Content-Type": "application/json", ...await getFirebaseAuthHeaders() },
             body: JSON.stringify({
               bookingData: {
                 bookingId: booking.bookingId,
                 userId: booking.userId,
-                userName: ownerSnapshot.data().name || booking.userName || "Farmer",
+                userName: ownerData?.name || booking.userName || "Farmer",
                 userEmail: registeredEmail,
                 mobileNumber: booking.mobileNumber || "",
                 cropName: booking.cropName || "Crop",
@@ -708,7 +708,7 @@ export default function AdminDashboard({ initialSection }: AdminDashboardProps =
           { merge: true }
         );
 
-        fetch(`${API_BASE}/api/send-prebooking-report`, {
+        fetch("/api/send-prebooking-report", {
           method: "POST",
           headers: { "Content-Type": "application/json", ...await getFirebaseAuthHeaders() },
           body: JSON.stringify({
@@ -778,7 +778,7 @@ export default function AdminDashboard({ initialSection }: AdminDashboardProps =
     setEmailStatusMsg(null);
 
     try {
-      const response = await fetch(`${API_BASE}/api/send-prebooking-retailer-email`, {
+      const response = await fetch("/api/send-prebooking-retailer-email", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...await getFirebaseAuthHeaders() },
         body: JSON.stringify({
@@ -954,18 +954,6 @@ export default function AdminDashboard({ initialSection }: AdminDashboardProps =
       console.error("Role update failed:", err);
       alert("Failed to update user role.");
     }
-  };
-
-  // Check overlap for a given machinery request against other approved requests.
-  const hasOverlapConflict = (req: MachineryRequest) => {
-    if (!req?.machineryId || !req?.requiredDate) return false;
-
-    return requestsList.some((other) => {
-      if (other.id === req.id) return false;
-      if (other.machineryId !== req.machineryId) return false;
-      if (other.requiredDate !== req.requiredDate) return false;
-      return other.status === "Approved" || other.status === "Booked";
-    });
   };
 
   // Metrics Calculations

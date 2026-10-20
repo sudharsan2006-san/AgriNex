@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from "react";
-import { collection, addDoc, serverTimestamp, query, where, getDocs, doc, getDoc, updateDoc } from "firebase/firestore";
+import React, { useState, useEffect, useRef } from "react";
+import { collection, addDoc, serverTimestamp, doc, getDoc, updateDoc } from "firebase/firestore";
 import { auth, db } from "../lib/firebase";
 import { getFirebaseAuthHeaders } from "../lib/authHelpers";
 import { API_BASE } from "../lib/apiBase";
@@ -63,10 +63,9 @@ export default function MachineryRequestModal({
   const [notes, setNotes] = useState("");
 
   const [loading, setLoading] = useState(false);
-  const [checkingConflict, setCheckingConflict] = useState(false);
-  const [conflictWarning, setConflictWarning] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submittedRequest, setSubmittedRequest] = useState<any | null>(null);
+  const submissionInProgress = useRef(false);
 
   // Preload user profile from Firestore if available
   useEffect(() => {
@@ -88,42 +87,10 @@ export default function MachineryRequestModal({
     loadUserProfile();
   }, [user]);
 
-  // Check if this machinery already has an Approved/Booked request on the selected date
-  useEffect(() => {
-    async function checkDateAvailability() {
-      if (!machinery.id || !requiredDate) return;
-      setCheckingConflict(true);
-      setConflictWarning(null);
-
-      try {
-        const q = query(
-          collection(db, "machineryRequests"),
-          where("machineryId", "==", machinery.id),
-          where("requiredDate", "==", requiredDate)
-        );
-        const snap = await getDocs(q);
-        const activeBookings = snap.docs.filter((d) => {
-          const status = d.data().status;
-          return status === "Approved" || status === "Booked";
-        });
-
-        if (activeBookings.length > 0) {
-          setConflictWarning(
-            `⚠️ Notice: This ${machinery.type} already has an approved booking scheduled on ${requiredDate}. Admin will review scheduling flexibility.`
-          );
-        }
-      } catch (err) {
-        console.warn("Availability check error:", err);
-      } finally {
-        setCheckingConflict(false);
-      }
-    }
-
-    checkDateAvailability();
-  }, [machinery.id, requiredDate]);
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submissionInProgress.current) return;
+
     if (!user) {
       setError("Please login to submit a machinery request.");
       return;
@@ -150,6 +117,7 @@ export default function MachineryRequestModal({
       return;
     }
 
+    submissionInProgress.current = true;
     setLoading(true);
     setError(null);
 
@@ -177,47 +145,49 @@ export default function MachineryRequestModal({
         cropName: cropName.trim() || null,
         notes: notes.trim(),
         status: "Pending Approval",
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
       };
 
       const docRef = await addDoc(collection(db, "machineryRequests"), {
         ...requestPayload,
         emailStatus: "pending",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
       });
 
-      try {
-        const emailRes = await fetch(`${API_BASE}/api/send-machinery-request-admin-email`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...await getFirebaseAuthHeaders() },
-          body: JSON.stringify({
-            requestData: {
-              ...requestPayload,
-              requestId,
-              status: "Pending Approval",
-            },
-          }),
-        });
-        const emailData = await emailRes.json().catch(() => ({}));
-        await updateDoc(doc(db, "machineryRequests", docRef.id), {
-          emailStatus: emailData?.success ? "sent" : "failed",
-          emailError: emailData?.error || null,
-          updatedAt: serverTimestamp(),
-        });
-        if (!emailData?.success) {
-          console.warn("Machinery admin email failed but request was saved:", emailData?.error || "Unknown email issue");
-        }
-      } catch (emailErr) {
-        console.warn("Machinery admin email dispatch error; request was kept in Firestore:", emailErr);
-        await updateDoc(doc(db, "machineryRequests", docRef.id), {
-          emailStatus: "failed",
-          emailError: "Admin email dispatch failed but request was retained.",
-          updatedAt: serverTimestamp(),
-        });
-      }
+      setSubmittedRequest({ ...requestPayload, id: docRef.id });
+      onSuccess?.();
 
-      // Create farmer in-app notification
-      await createNotification({
+      void (async () => {
+        try {
+          const emailRes = await fetch(`${API_BASE}/api/send-machinery-request-admin-email`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...await getFirebaseAuthHeaders() },
+            body: JSON.stringify({ requestData: requestPayload }),
+          });
+          const emailData = await emailRes.json().catch(() => ({}));
+          await updateDoc(doc(db, "machineryRequests", docRef.id), {
+            emailStatus: emailData?.success ? "sent" : "failed",
+            emailError: emailData?.error || null,
+            updatedAt: serverTimestamp(),
+          });
+          if (!emailRes.ok || !emailData?.success) {
+            console.warn("Machinery admin email failed but request was saved:", emailData?.error || `HTTP ${emailRes.status}`);
+          }
+        } catch (emailErr) {
+          console.error("Machinery admin email dispatch failed after the request was saved:", emailErr);
+          try {
+            await updateDoc(doc(db, "machineryRequests", docRef.id), {
+              emailStatus: "failed",
+              emailError: "Admin email dispatch failed but the request was retained.",
+              updatedAt: serverTimestamp(),
+            });
+          } catch (statusErr) {
+            console.error("Could not update machinery request email status:", statusErr);
+          }
+        }
+      })();
+
+      void createNotification({
         type: "machinery_request",
         title: "Machinery Request Submitted",
         message: `Your request for ${machinery.name} on ${requiredDate} for ${activity} has been submitted (Status: Pending Approval).`,
@@ -229,14 +199,20 @@ export default function MachineryRequestModal({
           requiredDate,
           status: "Pending Approval",
         },
+      }).catch((notificationErr) => {
+        console.error("Machinery request was saved, but its notification could not be created:", notificationErr);
       });
-
-      setSubmittedRequest({ ...requestPayload, id: docRef.id });
-      if (onSuccess) onSuccess();
     } catch (err: any) {
       console.error("Failed to submit machinery request:", err);
-      setError(err?.message || "Failed to submit request. Please check connection.");
+      setError(
+        err?.code === "permission-denied"
+          ? "Your account is not authorized to submit this request. Please sign in again."
+          : err?.code === "unavailable"
+            ? "The booking service is temporarily unavailable. Please check your connection and try again."
+            : err?.message || "Failed to save your request. Please try again."
+      );
     } finally {
+      submissionInProgress.current = false;
       setLoading(false);
     }
   };
@@ -339,13 +315,6 @@ export default function MachineryRequestModal({
           {error && (
             <div className="p-3 bg-red-50 text-red-700 rounded-2xl border border-red-200 flex items-center gap-2 font-bold">
               <AlertCircle size={16} /> {error}
-            </div>
-          )}
-
-          {conflictWarning && (
-            <div className="p-3 bg-amber-50 text-amber-800 rounded-2xl border border-amber-200 flex items-start gap-2 font-semibold">
-              <AlertCircle size={16} className="mt-0.5 shrink-0" />
-              <span>{conflictWarning}</span>
             </div>
           )}
 
@@ -505,7 +474,7 @@ export default function MachineryRequestModal({
               disabled={loading}
               className="flex-1 py-3.5 rounded-full font-black text-sm tracking-wide bg-[#2D6A4F] text-white hover:bg-[#1B4332] shadow-md transition-all active:scale-[0.98] disabled:opacity-60"
             >
-              {loading ? "Submitting..." : "Submit Request"}
+              {loading ? "Saving request..." : "Submit Request"}
             </button>
           </div>
         </form>

@@ -18,6 +18,7 @@ import { signOut } from "firebase/auth";
 import { db, auth } from "../lib/firebase";
 import { ADMIN_EMAIL, getFirebaseAuthHeaders, isAdminUserEmail } from "../lib/authHelpers";
 import {
+  FarmingActivityType,
   MachineryItem,
   MachineryRequest,
   MachineryStatus,
@@ -87,6 +88,10 @@ const MACHINERY_TYPES: MachineryType[] = [
   "Other",
 ];
 
+const MACHINERY_STATUSES: MachineryStatus[] = ["Available", "Booked", "Maintenance", "Unavailable"];
+const MACHINERY_REQUEST_STATUSES = ["Pending Approval", "Approved", "Booked", "Completed", "Rejected"] as const;
+const searchText = (value: unknown) => String(value ?? "").toLowerCase();
+
 interface AdminDashboardProps {
   initialSection?: "overview" | "requests" | "prebookings" | "prices" | "retailers" | "machinery" | "users" | "reports";
 }
@@ -106,6 +111,7 @@ export default function AdminDashboard({ initialSection }: AdminDashboardProps =
   // Real-time Firestore States
   const [machineryList, setMachineryList] = useState<MachineryItem[]>([]);
   const [requestsList, setRequestsList] = useState<MachineryRequest[]>([]);
+  const [requestsError, setRequestsError] = useState<string | null>(null);
   const [preBookingsList, setPreBookingsList] = useState<any[]>([]);
   const [usersList, setUsersList] = useState<any[]>([]);
   const [pricesList, setPricesList] = useState<CropPriceItem[]>(DEFAULT_REFERENCE_PRICES);
@@ -192,7 +198,32 @@ export default function AdminDashboard({ initialSection }: AdminDashboardProps =
     const unsubMachinery = onSnapshot(
       query(collection(db, "machinery"), orderBy("createdAt", "desc")),
       (snap) => {
-        setMachineryList(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
+        setMachineryList(snap.docs.map((d) => {
+          const data = d.data();
+          const price = Number(data.price ?? data.rentalRate ?? data.rate ?? 0);
+          return {
+            ...data,
+            id: d.id,
+            name: data.name || data.title || "Machinery",
+            type: (data.type || data.category || "Other") as MachineryType,
+            provider: data.provider || data.owner || "AgriNex Partner",
+            providerPhone: data.providerPhone || data.phone || "",
+            location: data.location || data.address || "Unknown Location",
+            price: Number.isFinite(price) ? price : 0,
+            rateUnit: data.rateUnit || data.rentalRateUnit || data.unit || "Day",
+            status: MACHINERY_STATUSES.includes(data.status)
+              ? data.status
+              : data.available === false
+                ? "Unavailable"
+                : "Available",
+            description: data.description || data.details || "",
+            imageUrl: data.imageUrl || data.image || data.photo || "",
+            horsePower: data.horsePower || data.hp || "",
+            fuelType: data.fuelType || "",
+            modelYear: data.modelYear || data.year || "",
+            capacity: data.capacity || "",
+          };
+        }));
         setLoading(false);
       },
       (err) => console.warn("Machinery snapshot error", err)
@@ -202,9 +233,41 @@ export default function AdminDashboard({ initialSection }: AdminDashboardProps =
     const unsubRequests = onSnapshot(
       query(collection(db, "machineryRequests"), orderBy("createdAt", "desc")),
       (snap) => {
-        setRequestsList(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
+        setRequestsList(snap.docs.map((d) => {
+          const data = d.data();
+          return {
+            ...data,
+            id: d.id,
+            requestId: data.requestId || d.id,
+            farmerId: data.farmerId || "",
+            farmerName: data.farmerName || "Farmer",
+            farmerEmail: data.farmerEmail || "",
+            farmerPhone: data.farmerPhone || "",
+            machineryId: data.machineryId || "",
+            machineryName: data.machineryName || "Machinery",
+            machineryType: (data.machineryType || "Other") as MachineryType,
+            provider: data.provider || "",
+            price: Number(data.price) || 0,
+            rateUnit: data.rateUnit || "Day",
+            requiredDate: data.requiredDate || "",
+            duration: data.duration || "1 Day",
+            farmLocation: data.farmLocation || "",
+            activity: (data.activity || "Other") as FarmingActivityType,
+            status: MACHINERY_REQUEST_STATUSES.includes(data.status)
+              ? data.status
+              : "Pending Approval",
+          };
+        }));
+        setRequestsError(null);
       },
-      (err) => console.warn("Requests snapshot error", err)
+      (err) => {
+        console.error("Requests snapshot error", err);
+        setRequestsError(
+          err.code === "permission-denied"
+            ? "Your admin account cannot access machinery requests. Please sign in with the authorized administrator account."
+            : "Machinery requests could not be loaded. Please refresh and try again."
+        );
+      }
     );
 
     // 3. Pre-Bookings
@@ -978,10 +1041,10 @@ export default function AdminDashboard({ initialSection }: AdminDashboardProps =
   const filteredRequests = requestsList.filter((req) => {
     const matchesFilter = requestFilter === "All" || req.status === requestFilter;
     const matchesSearch =
-      req.requestId.toLowerCase().includes(requestSearch.toLowerCase()) ||
-      req.farmerName.toLowerCase().includes(requestSearch.toLowerCase()) ||
-      req.machineryName.toLowerCase().includes(requestSearch.toLowerCase()) ||
-      req.farmLocation.toLowerCase().includes(requestSearch.toLowerCase());
+      searchText(req.requestId).includes(searchText(requestSearch)) ||
+      searchText(req.farmerName).includes(searchText(requestSearch)) ||
+      searchText(req.machineryName).includes(searchText(requestSearch)) ||
+      searchText(req.farmLocation).includes(searchText(requestSearch));
     return matchesFilter && matchesSearch;
   });
 
@@ -993,40 +1056,40 @@ export default function AdminDashboard({ initialSection }: AdminDashboardProps =
       status === preBookingFilter;
 
     const matchesSearch =
-      (bk.bookingId || "").toLowerCase().includes(preBookingSearch.toLowerCase()) ||
-      (bk.cropName || "").toLowerCase().includes(preBookingSearch.toLowerCase()) ||
-      (bk.userName || "").toLowerCase().includes(preBookingSearch.toLowerCase()) ||
-      (bk.userEmail || "").toLowerCase().includes(preBookingSearch.toLowerCase()) ||
-      (bk.preferredLocation || "").toLowerCase().includes(preBookingSearch.toLowerCase());
+      searchText(bk.bookingId).includes(searchText(preBookingSearch)) ||
+      searchText(bk.cropName).includes(searchText(preBookingSearch)) ||
+      searchText(bk.userName).includes(searchText(preBookingSearch)) ||
+      searchText(bk.userEmail).includes(searchText(preBookingSearch)) ||
+      searchText(bk.preferredLocation).includes(searchText(preBookingSearch));
 
     return matchesFilter && matchesSearch;
   });
 
   const filteredInventory = machineryList.filter(
     (m) =>
-      m.name.toLowerCase().includes(inventorySearch.toLowerCase()) ||
-      m.type.toLowerCase().includes(inventorySearch.toLowerCase()) ||
-      m.location.toLowerCase().includes(inventorySearch.toLowerCase()) ||
-      m.provider.toLowerCase().includes(inventorySearch.toLowerCase())
+      searchText(m.name).includes(searchText(inventorySearch)) ||
+      searchText(m.type).includes(searchText(inventorySearch)) ||
+      searchText(m.location).includes(searchText(inventorySearch)) ||
+      searchText(m.provider).includes(searchText(inventorySearch))
   );
 
   const filteredPrices = pricesList.filter((p) =>
-    p.commodity.toLowerCase().includes(priceSearch.toLowerCase())
+    searchText(p.commodity).includes(searchText(priceSearch))
   );
 
   const filteredRetailers = retailersList.filter(
     (r) =>
-      r.businessName.toLowerCase().includes(retailerSearch.toLowerCase()) ||
-      r.name.toLowerCase().includes(retailerSearch.toLowerCase()) ||
-      r.email.toLowerCase().includes(retailerSearch.toLowerCase()) ||
-      r.location.toLowerCase().includes(retailerSearch.toLowerCase())
+      searchText(r.businessName).includes(searchText(retailerSearch)) ||
+      searchText(r.name).includes(searchText(retailerSearch)) ||
+      searchText(r.email).includes(searchText(retailerSearch)) ||
+      searchText(r.location).includes(searchText(retailerSearch))
   );
 
   const filteredUsers = usersList.filter(
     (u) =>
-      (u.name || "").toLowerCase().includes(userSearch.toLowerCase()) ||
-      (u.email || "").toLowerCase().includes(userSearch.toLowerCase()) ||
-      (u.role || "").toLowerCase().includes(userSearch.toLowerCase())
+      searchText(u.name).includes(searchText(userSearch)) ||
+      searchText(u.email).includes(searchText(userSearch)) ||
+      searchText(u.role).includes(searchText(userSearch))
   );
 
   return (
@@ -1714,6 +1777,12 @@ export default function AdminDashboard({ initialSection }: AdminDashboardProps =
       {/* ================= 6. MACHINERY REQUESTS MANAGEMENT ================= */}
       {activeSection === "requests" && (
         <div className="space-y-4">
+          {requestsError && (
+            <div role="alert" className="bg-rose-50 border border-rose-200 text-rose-800 p-4 rounded-2xl text-sm font-semibold">
+              {requestsError}
+            </div>
+          )}
+
           <div className="bg-white p-4 rounded-3xl border border-gray-100 shadow-sm flex flex-wrap items-center gap-3">
             <div className="relative flex-1 min-w-[220px]">
               <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -1748,7 +1817,13 @@ export default function AdminDashboard({ initialSection }: AdminDashboardProps =
           ) : (
             <div className="grid gap-4">
               {filteredRequests.map((req) => {
-                const conflict = hasOverlapConflict(req);
+                const conflict = requestsList.some(
+                  (other) =>
+                    other.id !== req.id &&
+                    other.machineryId === req.machineryId &&
+                    other.requiredDate === req.requiredDate &&
+                    (other.status === "Approved" || other.status === "Booked")
+                );
 
                 return (
                   <div key={req.id} className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm space-y-3">
